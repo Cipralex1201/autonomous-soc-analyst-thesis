@@ -1,0 +1,36 @@
+---
+- name: Configure common Debian packages
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install administration packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - wget
+          - git
+          - htop
+          - ca-certificates
+          - gnupg
+          - python3
+          - sudo
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+- name: Configure monitored web server
+  hosts: web
+  become: true
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Enable and start nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        enabled: true
+        state: started
