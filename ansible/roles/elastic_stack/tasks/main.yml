@@ -1,0 +1,65 @@
+---
+- name: Install Elastic repository dependencies
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: Download Elastic signing key
+  ansible.builtin.get_url:
+    url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+    dest: /usr/share/keyrings/elasticsearch.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure official Elastic APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/elastic-9.x.list
+    content: |
+      deb [signed-by=/usr/share/keyrings/elasticsearch.asc] https://artifacts.elastic.co/packages/{{ elastic_repo_major }}/apt stable main
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Elasticsearch kernel setting
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-elasticsearch.conf
+    content: |
+      vm.max_map_count=1048576
+    owner: root
+    group: root
+    mode: "0644"
+  register: elastic_sysctl_config
+
+- name: Apply Elasticsearch kernel setting
+  ansible.builtin.command:
+    cmd: sysctl -p /etc/sysctl.d/99-elasticsearch.conf
+  when: elastic_sysctl_config.changed
+  changed_when: true
+
+- name: Install pinned Elasticsearch version
+  ansible.builtin.apt:
+    name: "elasticsearch={{ elastic_version }}"
+    state: present
+    update_cache: true
+
+- name: Start and enable Elasticsearch
+  ansible.builtin.systemd_service:
+    name: elasticsearch
+    state: started
+    enabled: true
+
+- name: Install pinned Kibana version
+  ansible.builtin.apt:
+    name: "kibana={{ elastic_version }}"
+    state: present
+
+- name: Start and enable Kibana
+  ansible.builtin.systemd_service:
+    name: kibana
+    state: started
+    enabled: true

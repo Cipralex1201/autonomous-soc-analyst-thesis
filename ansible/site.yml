@@ -34,3 +34,10 @@
         name: nginx
         enabled: true
         state: started
+
+- name: Deploy Elastic SIEM
+  hosts: siem
+  become: true
+
+  roles:
+    - elastic_stack

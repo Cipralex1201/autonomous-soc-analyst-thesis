@@ -1,0 +1,30 @@
+After Installing elasticsearch, password-generation is neededd:
+
+sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password \
+  -u elastic
+
+And generating enrollment token is needed as well:
+
+sudo /usr/share/elasticsearch/bin/elasticsearch-create-enrollment-token \
+  -s kibana
+
+then:
+sudo /usr/share/kibana/bin/kibana-verification-code 
+
+
+SSH port forwarding is a great option if you don't want to expose kibana to the web:
+ssh -N -L 5601:127.0.0.1:<remote-port> <remote-host>
+
+then you need to configure kibana encryption keys:
+sudo /usr/share/kibana/bin/kibana-encryption-keys generate
+
+The generated keys will look like these:
+xpack.security.encryptionKey: "..."
+xpack.encryptedSavedObjects.encryptionKey: "..."
+xpack.reporting.encryptionKey: "..."
+
+Add them to the bottom of the kibana configuration file (preserving existing configurations):
+sudo nano /etc/kibana/kibana.yml
+
+Then restart kibana:
+sudo systemctl restart kibana
