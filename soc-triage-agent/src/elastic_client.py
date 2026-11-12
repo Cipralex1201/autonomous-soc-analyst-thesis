@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from elasticsearch import Elasticsearch
+from elastic_transport import ApiError, TransportError
 
 from .config import Settings
 from .schemas import AlertContext
@@ -36,8 +37,24 @@ class ElasticClient:
             kwargs["ca_certs"] = settings.elastic_ca_cert
         return Elasticsearch(**kwargs)
 
-    def ping(self) -> bool:
-        return bool(self.client.ping())
+    def check_read_access(self) -> None:
+        """Validate read access without requiring cluster-level privileges."""
+        try:
+            self.client.search(
+                index=self.settings.elastic_alert_index,
+                query={"match_all": {}},
+                size=0,
+                track_total_hits=False,
+            )
+        except ApiError as exc:
+            status = exc.meta.status
+            if status == 401:
+                raise ElasticAccessError("authentication", "Elasticsearch authentication failed (HTTP 401)") from exc
+            if status == 403:
+                raise ElasticAccessError("authorization", "Elasticsearch alert-index access denied (HTTP 403)") from exc
+            raise ElasticAccessError("elasticsearch", f"Elasticsearch returned HTTP {status}") from exc
+        except TransportError as exc:
+            raise ElasticAccessError("connection", f"Elasticsearch connection/TLS failure: {exc}") from exc
 
     def get_alert(self, alert_id: str) -> AlertContext:
         response = self.client.get(index=self.settings.elastic_alert_index, id=alert_id)
@@ -107,3 +124,11 @@ class ElasticClient:
             **request,
         )
         return dict(response)
+
+
+class ElasticAccessError(RuntimeError):
+    """A categorized failure while validating Elasticsearch read access."""
+
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category

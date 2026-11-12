@@ -8,7 +8,7 @@ import logging
 import sys
 
 from .config import Settings
-from .elastic_client import ElasticClient
+from .elastic_client import ElasticAccessError, ElasticClient
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,14 +27,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         client = ElasticClient(settings)
         if args.command == "check":
-            if not client.ping():
-                logging.error("Elasticsearch did not respond to ping")
-                return 1
+            client.check_read_access()
             print("Elasticsearch connection OK")
             return 0
         alert = client.get_alert(args.alert_id)
         print(json.dumps(alert.model_dump(mode="json"), indent=2))
         return 0
+    except ElasticAccessError as exc:
+        logging.error("%s", exc)
+        return 1
     except (OSError, ValueError, RuntimeError) as exc:
         logging.error("Elasticsearch operation failed: %s", exc)
         return 1

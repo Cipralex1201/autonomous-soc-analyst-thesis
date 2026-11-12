@@ -1,0 +1,56 @@
+in kibana, open: Dev Tools/Console
+
+run the following:
+
+"""
+
+POST /_security/api_key
+{
+  "name": "soc-triage-agent",
+  "role_descriptors": {
+    "soc_triage_role": {
+      "cluster": [],
+      "indices": [
+        {
+          "names": [
+            ".alerts-security.alerts-default",
+            "logs-*",
+            "filebeat-*"
+          ],
+          "privileges": [
+            "read",
+            "view_index_metadata"
+          ]
+        },
+        {
+          "names": [
+            "soc-triage-results-*",
+            "soc-triage-traces-*",
+            "soc-triage-state-*"
+          ],
+          "privileges": [
+            "read",
+            "write",
+            "create_index",
+            "view_index_metadata"
+          ]
+        }
+      ]
+    }
+  }
+}
+
+"""
+
+the return value will be something like this:
+"""
+{
+  "id": "abc123",
+  "name": "soc-triage-agent",
+  "api_key": "generated-secret",
+  "encoded": "base64-encoded-credential"
+}
+"""
+
+
+Copy the value of encoded in the .env file to the ELASTIC_API_KEY

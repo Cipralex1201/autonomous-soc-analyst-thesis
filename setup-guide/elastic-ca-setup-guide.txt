@@ -1,0 +1,15 @@
+1. Find the certificate on the Elasticsearch server
+SSH into the machine hosting Elasticsearch and run:
+sudo ls -l /etc/elasticsearch/certs/
+
+The file you usually need is:
+/etc/elasticsearch/certs/http_ca.crt
+
+2. Copy the certificate to the machine running the agent (or in case it's the same machine, copy it to the users directory or somewhere)
+modify its file and group permissions:
+
+sudo chown user:user /home/user/certs/http_ca.crt
+chmod 644 /home/user/certs/http_ca.crt
+
+3. Update the .env
+write the absolute path of the certificate to the ELASTIC_CA_CERT field.

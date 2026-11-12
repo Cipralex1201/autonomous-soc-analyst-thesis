@@ -22,3 +22,18 @@ def test_search_rejects_unconfigured_index() -> None:
         assert "not configured" in str(exc)
     else:
         raise AssertionError("unconfigured index was accepted")
+
+
+def test_read_access_uses_alert_index_search_without_ping() -> None:
+    client_api = Mock()
+    client = ElasticClient(Settings(), client=client_api)
+
+    client.check_read_access()
+
+    client_api.search.assert_called_once_with(
+        index=".alerts-security.alerts-default",
+        query={"match_all": {}},
+        size=0,
+        track_total_hits=False,
+    )
+    client_api.ping.assert_not_called()

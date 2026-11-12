@@ -27,6 +27,11 @@ Git. Configuration rejects invalid URLs, index patterns, limits, and log levels.
 The manual command retrieves an alert by ID regardless of its age and prints a
 normalized, JSON-safe context. It does not alter any polling state.
 
+The `check` command performs a zero-result `match_all` search against
+`ELASTIC_ALERT_INDEX`, so the API key only needs read access to that index; it
+does not call the cluster-level `ping` endpoint. Authentication (401),
+authorization (403), and connection/TLS failures are reported separately.
+
 The tools `get_source_activity`, `get_http_statistics`, and `get_related_alerts`
 use explicit time ranges, exact IP filters, configured index patterns, bounded
 result sizes, and no caller-supplied Elasticsearch DSL. HTTP statistics returns
