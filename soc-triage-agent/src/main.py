@@ -8,7 +8,9 @@ import logging
 import sys
 
 from .config import Settings
+from .agent import TriageAgent
 from .elastic_client import ElasticAccessError, ElasticClient
+from .tools import InvestigationTools
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check", help="validate Elasticsearch connectivity")
     investigate = subparsers.add_parser("investigate", help="retrieve a historical alert by ID")
     investigate.add_argument("--alert-id", required=True)
+    triage = subparsers.add_parser("triage", help="investigate an alert with the configured LLM")
+    triage.add_argument("--alert-id", required=True)
     return parser
 
 
@@ -31,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
             print("Elasticsearch connection OK")
             return 0
         alert = client.get_alert(args.alert_id)
+        if args.command == "triage":
+            report = TriageAgent(settings, InvestigationTools(client, settings)).run(alert)
+            print(json.dumps(report.model_dump(mode="json"), indent=2))
+            return 0
         print(json.dumps(alert.model_dump(mode="json"), indent=2))
         return 0
     except ElasticAccessError as exc:

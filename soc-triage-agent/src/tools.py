@@ -41,13 +41,21 @@ def _time_query(start: str, end: str) -> dict[str, Any]:
     return {"range": {"@timestamp": {"gte": start, "lte": end}}}
 
 
+def _total_value(total: Any) -> int:
+    if isinstance(total, dict):
+        return int(total.get("value", 0))
+    return int(total or 0)
+
+
 class InvestigationTools:
     def __init__(self, elastic: ElasticClient, settings: Settings) -> None:
         self.elastic = elastic
         self.settings = settings
+        self.last_query: dict[str, Any] | None = None
 
     def _execute(self, name: str, args: BaseModel, query: dict[str, Any], size: int, index: str) -> ToolResult:
         try:
+            self.last_query = {"index": index, "query": query, "size": size}
             response = self.elastic.search(index=index, query=query, size=size)
             hits = response.get("hits", {})
             return ToolResult(
@@ -78,25 +86,27 @@ class InvestigationTools:
             source_ip = _validate_ip(args.source_ip)
             start, end = _bounded_window(args.start, args.end, self.settings)
             query = {"bool": {"filter": [_time_query(start, end), {"term": {"source.ip": source_ip}}]}}
+            aggregations = {
+                "unique_paths": {"cardinality": {"field": "url.original", "precision_threshold": 1000}},
+                "status_codes": {"terms": {"field": "http.response.status_code", "size": 20}},
+                "common_paths": {"terms": {"field": "url.original", "size": 20}},
+                "user_agents": {"terms": {"field": "user_agent.original", "size": 20}},
+                "requests_over_time": {
+                    "date_histogram": {"field": "@timestamp", "fixed_interval": "1m", "min_doc_count": 0}
+                },
+            }
+            self.last_query = {"index": self.settings.elastic_nginx_index, "query": query, "size": 0, "aggregations": aggregations}
             response = self.elastic.search(
                 index=self.settings.elastic_nginx_index,
                 query=query,
                 size=0,
-                aggregations={
-                    "unique_paths": {"cardinality": {"field": "url.path", "precision_threshold": 1000}},
-                    "status_codes": {"terms": {"field": "http.response.status_code", "size": 20}},
-                    "common_paths": {"terms": {"field": "url.path", "size": 20}},
-                    "user_agents": {"terms": {"field": "user_agent.original", "size": 20}},
-                    "requests_over_time": {
-                        "date_histogram": {"field": "@timestamp", "fixed_interval": "1m", "min_doc_count": 0}
-                    },
-                },
+                aggregations=aggregations,
             )
             return ToolResult(
                 tool_name="get_http_statistics",
                 ok=True,
                 data={
-                    "total_requests": response.get("hits", {}).get("total", 0),
+                    "total_requests": _total_value(response.get("hits", {}).get("total", 0)),
                     "statistics": response.get("aggregations", {}),
                 },
             )
@@ -120,3 +130,30 @@ class InvestigationTools:
 
 
 TOOL_NAMES = ("get_source_activity", "get_http_statistics", "get_related_alerts")
+
+
+def tool_definitions() -> list[dict[str, Any]]:
+    """Return Responses API function definitions for the approved tools."""
+    return [
+        {
+            "type": "function",
+            "name": "get_source_activity",
+            "description": "Retrieve bounded telemetry activity from an alert source IP.",
+            "parameters": SourceActivityArgs.model_json_schema(),
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "get_http_statistics",
+            "description": "Calculate bounded HTTP request statistics for a source IP.",
+            "parameters": HttpStatisticsArgs.model_json_schema(),
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "get_related_alerts",
+            "description": "Find related Elastic Security alerts by source IP or host.",
+            "parameters": RelatedAlertsArgs.model_json_schema(),
+            "strict": True,
+        },
+    ]

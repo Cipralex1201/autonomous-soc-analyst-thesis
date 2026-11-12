@@ -71,3 +71,36 @@ class ToolResult(BaseModel):
 
 Assessment = Literal["true_positive", "false_positive", "uncertain"]
 ProposedAction = Literal["ESCALATE", "CLOSE"]
+
+
+class TriageAssessment(BaseModel):
+    assessment: Assessment
+    severity: str
+    confidence: float = Field(ge=0, le=1)
+    summary: str
+    evidence: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    recommended_next_steps: list[str] = Field(default_factory=list)
+
+
+class TriageReport(BaseModel):
+    alert_id: str
+    investigation_id: str
+    assessment: Assessment
+    proposed_action: ProposedAction
+    severity: str
+    confidence: float = Field(ge=0, le=1)
+    summary: str
+    evidence: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    recommended_next_steps: list[str] = Field(default_factory=list)
+    tool_call_count: int = Field(ge=0)
+    model_request_count: int = Field(ge=0)
+    processing_duration_seconds: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def enforce_action_mapping(self) -> "TriageReport":
+        expected = "CLOSE" if self.assessment == "false_positive" else "ESCALATE"
+        if self.proposed_action != expected:
+            raise ValueError("proposed_action does not match assessment policy")
+        return self

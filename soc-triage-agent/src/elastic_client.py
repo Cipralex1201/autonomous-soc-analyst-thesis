@@ -21,6 +21,14 @@ def _nested(source: Mapping[str, Any], *path: str) -> Any:
     return value
 
 
+def _field(source: Mapping[str, Any], *path: str) -> Any:
+    """Read ECS fields whether Elasticsearch returned dotted or nested keys."""
+    dotted = ".".join(path)
+    if dotted in source:
+        return source[dotted]
+    return _nested(source, *path)
+
+
 class ElasticClient:
     """Authorized access to alerts and read-only telemetry queries."""
 
@@ -80,19 +88,19 @@ class ElasticClient:
             event_ids = [event_ids]
         return AlertContext(
             alert_id=alert_id,
-            rule_name=_nested(source, "kibana", "alert", "rule", "name")
-            or _nested(source, "kibana", "alert", "rule", "rule_name"),
-            rule_description=_nested(source, "kibana", "alert", "rule", "description"),
-            detected_at=source.get("@timestamp") or _nested(source, "kibana", "alert", "original_time"),
-            severity=_nested(source, "kibana", "alert", "severity"),
-            risk_score=_nested(source, "kibana", "alert", "risk_score"),
-            source_ip=_nested(source, "source", "ip"),
-            destination_ip=_nested(source, "destination", "ip"),
-            host_name=_nested(source, "host", "name"),
-            user_name=_nested(source, "user", "name"),
+            rule_name=_field(source, "kibana", "alert", "rule", "name")
+            or _field(source, "kibana", "alert", "rule", "rule_name"),
+            rule_description=_field(source, "kibana", "alert", "rule", "description"),
+            detected_at=source.get("@timestamp") or _field(source, "kibana", "alert", "original_time"),
+            severity=_field(source, "kibana", "alert", "severity"),
+            risk_score=_field(source, "kibana", "alert", "risk_score"),
+            source_ip=_field(source, "source", "ip"),
+            destination_ip=_field(source, "destination", "ip"),
+            host_name=_field(source, "host", "name"),
+            user_name=_field(source, "user", "name"),
             event_ids=list(event_ids),
             metadata={
-                "event_kind": source.get("event", {}).get("kind") if isinstance(source.get("event"), Mapping) else None,
+                "event_kind": _field(source, "event", "kind"),
                 "original": source,
             },
         )

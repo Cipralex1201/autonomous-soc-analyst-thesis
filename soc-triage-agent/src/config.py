@@ -22,6 +22,16 @@ class Settings(BaseModel):
     max_query_results: int = Field(default=100, gt=0, le=1000)
     max_query_window_minutes: int = Field(default=30, gt=0, le=1440)
     log_level: str = "INFO"
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    prompt_inspection_mode: str = "off"
+    log_llm_requests: bool = False
+    log_llm_responses: bool = False
+    log_tool_calls: bool = False
+    log_tool_results: bool = False
+    log_triage_results: bool = False
+    max_tool_calls: int = Field(default=5, gt=0, le=100)
+    max_model_requests: int = Field(default=8, gt=0, le=100)
 
     @field_validator("elastic_url")
     @classmethod
@@ -45,6 +55,14 @@ class Settings(BaseModel):
             raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
         return normalized
 
+    @field_validator("prompt_inspection_mode")
+    @classmethod
+    def validate_prompt_inspection_mode(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"off", "log", "pause"}:
+            raise ValueError("PROMPT_INSPECTION_MODE must be off, log, or pause")
+        return normalized
+
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
         """Load a dotenv file, then apply environment variables."""
@@ -61,6 +79,16 @@ class Settings(BaseModel):
             "MAX_QUERY_RESULTS": "max_query_results",
             "MAX_QUERY_WINDOW_MINUTES": "max_query_window_minutes",
             "LOG_LEVEL": "log_level",
+            "OPENAI_API_KEY": "openai_api_key",
+            "OPENAI_MODEL": "openai_model",
+            "PROMPT_INSPECTION_MODE": "prompt_inspection_mode",
+            "LOG_LLM_REQUESTS": "log_llm_requests",
+            "LOG_LLM_RESPONSES": "log_llm_responses",
+            "LOG_TOOL_CALLS": "log_tool_calls",
+            "LOG_TOOL_RESULTS": "log_tool_results",
+            "LOG_TRIAGE_RESULTS": "log_triage_results",
+            "MAX_TOOL_CALLS": "max_tool_calls",
+            "MAX_MODEL_REQUESTS": "max_model_requests",
         }
         for environment_name, field_name in mapping.items():
             value = os.getenv(environment_name)

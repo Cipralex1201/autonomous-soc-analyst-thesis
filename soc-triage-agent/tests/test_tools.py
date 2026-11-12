@@ -21,12 +21,13 @@ def test_http_tool_rejects_invalid_ip() -> None:
 
 def test_http_tool_builds_bounded_query() -> None:
     elastic = Mock()
-    elastic.search.return_value = {"hits": {"total": 0, "hits": []}}
+    elastic.search.return_value = {"hits": {"total": {"value": 4, "relation": "eq"}, "hits": []}}
     tools = InvestigationTools(elastic, Settings())
     start = datetime.now(timezone.utc)
     result = tools.get_http_statistics(
         HttpStatisticsArgs(source_ip="192.0.2.10", start=start, end=start + timedelta(minutes=1))
     )
     assert result.ok is True
+    assert result.data["total_requests"] == 4
     query = elastic.search.call_args.kwargs["query"]
     assert query["bool"]["filter"][1] == {"term": {"source.ip": "192.0.2.10"}}
