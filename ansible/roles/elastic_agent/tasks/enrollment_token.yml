@@ -1,0 +1,52 @@
+---
+- name: Retrieve Fleet agent policies
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:5601/api/fleet/agent_policies"
+    method: GET
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    return_content: true
+  delegate_to: hp6460b
+  become: false
+  register: fleet_policies
+  no_log: true
+
+- name: Find web server policy ID
+  ansible.builtin.set_fact:
+    web_policy_id: >-
+      {{
+        (
+          fleet_policies.json.items
+          | selectattr('name', 'equalto', 'web-server-policy')
+          | list
+          | first
+        ).id
+      }}
+  no_log: true
+
+- name: Create Fleet enrollment token
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:5601/api/fleet/enrollment_api_keys"
+    method: POST
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    headers:
+      kbn-xsrf: "true"
+    body_format: json
+    body:
+      name: "ansible-web-{{ inventory_hostname }}"
+      policy_id: "{{ web_policy_id }}"
+      expiration: "24h"
+    status_code: 200
+    return_content: true
+  delegate_to: hp6460b
+  become: false
+  register: enrollment_response
+  no_log: true
+
+- name: Save enrollment token for this run
+  ansible.builtin.set_fact:
+    elastic_enrollment_token: "{{ enrollment_response.json.item.api_key }}"
+  no_log: true

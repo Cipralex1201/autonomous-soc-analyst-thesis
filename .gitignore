@@ -1,2 +1,17 @@
 /other/
 /pentest-basics-training/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*pswd.txt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local data
+*.db
+*.sqlite3

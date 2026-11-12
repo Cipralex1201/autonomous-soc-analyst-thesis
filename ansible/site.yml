@@ -23,6 +23,9 @@
   hosts: web
   become: true
 
+  roles:
+    - docker
+
   tasks:
     - name: Install nginx
       ansible.builtin.apt:
@@ -34,6 +37,10 @@
         name: nginx
         enabled: true
         state: started
+    - name: Disable default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
 
 - name: Deploy Elastic SIEM
   hosts: siem
