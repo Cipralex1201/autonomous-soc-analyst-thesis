@@ -24,10 +24,10 @@ LLM-related settings are:
   `LOG_TOOL_RESULTS`, and `LOG_TRIAGE_RESULTS`.
 * `MAX_TOOL_CALLS` and `MAX_MODEL_REQUESTS` bound each investigation.
 
-Prompt logging shows the sanitized payload actually passed to the SDK. `pause`
-requires a TTY and applies to every model request, including follow-ups. Logs
-and prompts redact API keys, authorization values, cookies, passwords, tokens,
-and secrets.
+Prompt logging shows the sanitized payload passed to the SDK. `pause` requires
+a TTY and prints the exact payload passed to the SDK before every model
+request, including follow-ups. Log output redacts API keys, authorization
+values, cookies, passwords, tokens, and secrets.
 
 ## Commands
 
@@ -38,7 +38,10 @@ and secrets.
 ```
 
 `investigate` only retrieves and normalizes an alert, so it does not spend
-OpenAI credits. `triage` sends the normalized alert to the configured model.
+OpenAI credits. `triage` sends a compact alert context to the configured
+model: alert identity, rule details, timestamp, severity, source IP, and
+bounded detection evidence. It does not send the original alert document,
+Elastic rule documentation, or full detection queries.
 The model may request `get_source_activity`, `get_http_statistics`, or
 `get_related_alerts`; Python validates each request, executes a bounded query,
 and sends the bounded result back in a follow-up Responses API call. Arbitrary

@@ -6,6 +6,7 @@ from src.agent import TriageAgent
 from src.config import Settings
 from src.observability import sanitize
 from src.schemas import AlertContext, ToolResult
+from src.elastic_client import ElasticClient
 
 
 def alert() -> AlertContext:
@@ -111,3 +112,43 @@ def test_malformed_model_output_and_budget_exhaustion_escalate_safely() -> None:
 def test_sensitive_values_are_redacted() -> None:
     result = sanitize({"api_key": "secret", "headers": {"authorization": "Bearer secret"}, "value": "ok"})
     assert result == {"api_key": "[REDACTED]", "headers": {"authorization": "[REDACTED]"}, "value": "ok"}
+
+
+def test_large_alert_request_uses_compact_detection_context() -> None:
+    source = {
+        "kibana.alert.rule.name": "Generic web anomaly",
+        "kibana.alert.rule.description": "Detects unusual web activity.",
+        "@timestamp": "2026-01-01T00:00:00Z",
+        "kibana.alert.severity": "high",
+        "source.ip": "192.0.2.10",
+        "Esql": {
+            "event_count": 623,
+            "url_original_count_distinct": 615,
+            "url_original_values": [f"/path/{index}" for index in range(500)],
+        },
+        "metadata": {
+            "original": {"lengthy": "Elastic investigation guide " * 100},
+        },
+    }
+    normalized = ElasticClient.normalize_alert("large-alert", source)
+    openai = Mock()
+    openai.responses.create.return_value = response([], json.dumps({
+        "assessment": "uncertain",
+        "severity": "high",
+        "confidence": 0,
+        "summary": "Insufficient evidence.",
+        "evidence": [],
+        "missing_evidence": [],
+        "recommended_next_steps": [],
+    }))
+
+    TriageAgent(settings(), Mock(), openai).run(normalized)
+
+    payload = openai.responses.create.call_args.kwargs
+    request_input = payload["input"]
+    assert "metadata.original" not in request_input
+    assert "Elastic investigation guide" not in request_input
+    assert "event_count" in request_input and "623" in request_input
+    assert "url_original_count_distinct" in request_input and "615" in request_input
+    assert request_input.count("/path/") == 10
+    assert len(request_input) < 3000

@@ -29,6 +29,42 @@ def _field(source: Mapping[str, Any], *path: str) -> Any:
     return _nested(source, *path)
 
 
+def _detection_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract bounded, rule-agnostic evidence fields from an alert document."""
+    event_count: Any = None
+    distinct_url_count: Any = None
+    url_paths: list[str] = []
+
+    def visit(value: Any) -> None:
+        nonlocal event_count, distinct_url_count
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                normalized = str(key).lower().replace(".", "_")
+                if normalized.endswith("event_count") and isinstance(child, (int, float)):
+                    event_count = child
+                elif normalized.endswith("url_original_count_distinct") and isinstance(child, (int, float)):
+                    distinct_url_count = child
+                elif "url_original" in normalized and isinstance(child, list):
+                    url_paths.extend(item for item in child if isinstance(item, str))
+                visit(child)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(source)
+    evidence: dict[str, Any] = {}
+    if event_count is not None:
+        evidence["event_count"] = event_count
+    if distinct_url_count is not None:
+        evidence["url_original_count_distinct"] = distinct_url_count
+    if url_paths:
+        evidence["url_path_total_count"] = (
+            distinct_url_count if distinct_url_count is not None else len(url_paths)
+        )
+        evidence["representative_url_paths"] = url_paths[:10]
+    return evidence
+
+
 class ElasticClient:
     """Authorized access to alerts and read-only telemetry queries."""
 
@@ -99,9 +135,9 @@ class ElasticClient:
             host_name=_field(source, "host", "name"),
             user_name=_field(source, "user", "name"),
             event_ids=list(event_ids),
+            detection_evidence=_detection_evidence(source),
             metadata={
                 "event_kind": _field(source, "event", "kind"),
-                "original": source,
             },
         )
 

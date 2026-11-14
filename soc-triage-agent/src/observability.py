@@ -24,13 +24,13 @@ def sanitize(value: Any) -> Any:
 
 
 def inspect_request(payload: Mapping[str, Any], mode: str, logger: logging.Logger) -> None:
-    sanitized = sanitize(payload)
-    rendered = json.dumps(sanitized, default=str, indent=2)
     if mode == "log":
+        rendered = json.dumps(sanitize(payload), default=str, indent=2)
         logger.info("LLM request:\n%s", rendered)
     elif mode == "pause":
         if not sys.stdin.isatty():
             raise RuntimeError("PROMPT_INSPECTION_MODE=pause requires an interactive terminal")
-        print(rendered)
+        # Pause mode is for inspecting the exact object passed to the SDK.
+        print(json.dumps(payload, default=str, indent=2))
         if input("Send this request to OpenAI? [y/N] ").strip().lower() not in {"y", "yes"}:
             raise RuntimeError("LLM request rejected by operator")

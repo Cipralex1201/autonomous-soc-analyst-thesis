@@ -20,6 +20,7 @@ class AlertContext(BaseModel):
     host_name: str | None = None
     user_name: str | None = None
     event_ids: list[str] = Field(default_factory=list)
+    detection_evidence: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
