@@ -20,7 +20,11 @@ def load_system_prompt(path: Path = PROMPT_PATH) -> tuple[str, str, str]:
     return content, path.stem, digest
 
 
-def alert_input(alert: AlertContext, max_query_window_minutes: int) -> str:
+def alert_input(
+    alert: AlertContext,
+    max_query_window_minutes: int,
+    allowed_index_patterns: tuple[str, ...] | None = None,
+) -> str:
     rule_description = alert.rule_description
     if rule_description and len(rule_description) > MAX_RULE_DESCRIPTION_LENGTH:
         rule_description = (
@@ -41,6 +45,8 @@ def alert_input(alert: AlertContext, max_query_window_minutes: int) -> str:
         f"Investigation constraints: each SIEM search window must be no longer "
         f"than {max_query_window_minutes} minutes. Start with a search window "
         "centered on the alert timestamp. If a tool rejects arguments, retry "
-        "with valid arguments rather than abandoning the investigation.\n\n"
+        "with valid arguments rather than abandoning the investigation. "
+        f"Permitted Elasticsearch index patterns: "
+        f"{json.dumps(list(allowed_index_patterns or ()), separators=(',', ':'))}\n\n"
         f"{json.dumps(sanitize(compact_context), indent=2, default=str)}"
     )

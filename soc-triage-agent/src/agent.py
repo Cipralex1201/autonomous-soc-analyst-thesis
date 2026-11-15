@@ -12,16 +12,13 @@ from typing import Any
 from openai import OpenAI
 from pydantic import ValidationError
 
-from .config import Settings
+from .config import Settings, configured_index_patterns
 from .observability import inspect_request, sanitize
 from .prompts import alert_input, load_system_prompt
 from .schemas import (
     AlertContext,
     DiscoverFieldsArgs,
     ElasticsearchSearchArgs,
-    HttpStatisticsArgs,
-    RelatedAlertsArgs,
-    SourceActivityArgs,
     TriageAssessment,
     TriageReport,
     ToolResult,
@@ -63,7 +60,11 @@ class TriageAgent:
         tool_calls = 0
         try:
             response = None
-            input_items: Any = alert_input(alert, self.settings.max_query_window_minutes)
+            input_items: Any = alert_input(
+                alert,
+                self.settings.max_query_window_minutes,
+                configured_index_patterns(self.settings),
+            )
             previous_response_id: str | None = None
             while requests < self.settings.max_model_requests:
                 payload: dict[str, Any] = {
@@ -138,9 +139,6 @@ class TriageAgent:
         models = {
             "search_elasticsearch": (ElasticsearchSearchArgs, self.tools.search_elasticsearch),
             "discover_fields": (DiscoverFieldsArgs, self.tools.discover_fields),
-            "get_source_activity": (SourceActivityArgs, self.tools.get_source_activity),
-            "get_http_statistics": (HttpStatisticsArgs, self.tools.get_http_statistics),
-            "get_related_alerts": (RelatedAlertsArgs, self.tools.get_related_alerts),
         }
         if name not in models:
             result = ToolResult(tool_name=name or "unknown", ok=False, error="unknown tool")

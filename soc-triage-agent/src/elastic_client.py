@@ -9,6 +9,7 @@ from elasticsearch import Elasticsearch
 from elastic_transport import ApiError, TransportError
 
 from .config import Settings
+from .config import index_authorization_error, is_configured_index
 from .evidence import compact_detection_evidence, field
 from .schemas import AlertContext
 
@@ -101,12 +102,8 @@ class ElasticClient:
         timeout: str | None = None,
     ) -> dict[str, Any]:
         """Execute an application-built query against an explicitly configured index."""
-        if index not in {
-            self.settings.elastic_telemetry_indices,
-            self.settings.elastic_nginx_index,
-            self.settings.elastic_alert_index,
-        }:
-            raise ValueError("index is not configured for this application")
+        if not is_configured_index(self.settings, index):
+            raise ValueError(index_authorization_error(self.settings, index))
         request: dict[str, Any] = {
             "index": index,
             "query": dict(query),
@@ -134,12 +131,8 @@ class ElasticClient:
         timeout: str | None = None,
     ) -> dict[str, Any]:
         """Return bounded field metadata for an explicitly configured index."""
-        if index not in {
-            self.settings.elastic_telemetry_indices,
-            self.settings.elastic_nginx_index,
-            self.settings.elastic_alert_index,
-        }:
-            raise ValueError("index is not configured for this application")
+        if not is_configured_index(self.settings, index):
+            raise ValueError(index_authorization_error(self.settings, index))
         request: dict[str, Any] = {
             "index": index,
             "fields": fields or ["*"],

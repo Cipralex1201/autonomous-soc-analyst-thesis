@@ -42,12 +42,10 @@ OpenAI credits. `triage` sends a compact alert context to the configured
 model: alert identity, rule details, timestamp, severity, source IP, and
 bounded detection evidence. It does not send the original alert document,
 Elastic rule documentation, or full detection queries.
-The model may request `get_source_activity`, `get_http_statistics`, or
-`get_related_alerts`; Python validates each request, executes a bounded query,
-and sends the bounded result back in a follow-up Responses API call using the
-Responses conversation state and matching function-call IDs. Query windows are
-limited by `MAX_QUERY_WINDOW_MINUTES`; rejected arguments are returned to the
-model so it can retry within that limit. Arbitrary Elasticsearch DSL and shell
+The model may request only `discover_fields` and `search_elasticsearch`;
+Python validates each request, executes a bounded query, and sends the bounded
+result back in a follow-up Responses API call using the Responses conversation
+state and matching function-call IDs. Arbitrary Elasticsearch DSL and shell
 execution are not available; generic Query DSL is accepted only through the
 validated read-only search tool.
 
@@ -57,13 +55,12 @@ source fields, sorting, and aggregations; Python validates allowed indices,
 rejects unsafe/resource-intensive features, applies the Elasticsearch timeout,
 and bounds the serialized result with `MAX_TOOL_RESULT_BYTES`.
 
-SIEM tool results are normalized before they reach the model. Telemetry uses
-common ECS fields plus bounded detection-specific evidence; HTTP statistics
-contain counts, top paths, status/user-agent distributions, and time buckets;
-related alerts contain identifiers, rule names, timestamps, severities, and
-key evidence only. Retrieval uses source filtering and deterministic limits,
-and each result declares sampled or omitted information. Full Elasticsearch
-documents remain unchanged in Elasticsearch.
+SIEM tool results are normalized before they reach the model. Retrieved
+documents use compact `columns` and `rows` tables, with repeated values moved
+to optional `common_fields`; aggregations remain server-side and are returned
+in compact form. Retrieval uses source filtering and bounded limits, and each
+result declares sampled or omitted information. Full Elasticsearch documents
+remain unchanged in Elasticsearch.
 
 The final model assessment is validated with Pydantic and application code
 derives `ESCALATE` or `CLOSE`. Failures and exhausted budgets safely become
@@ -84,11 +81,12 @@ experiments.
 
 ## Investigation tools
 
-The tools use explicit time ranges, exact IP filters, configured index
-patterns, bounded result sizes, and no caller-supplied Elasticsearch DSL.
-HTTP statistics aggregates `url.original`, `http.response.status_code`,
-`user_agent.original`, and request counts over time. Missing optional alert
-fields remain optional.
+The generic search tool accepts caller-supplied read-only Query DSL only after
+validation, and restricts searches to the configured telemetry or Elastic
+Security alert indices. It preserves explicit source filtering, bounded result
+sizes, result-byte limits, and observability.
+Concrete index names matching a configured wildcard pattern are authorized;
+other index expressions are rejected with the permitted patterns listed.
 
 Run tests with:
 

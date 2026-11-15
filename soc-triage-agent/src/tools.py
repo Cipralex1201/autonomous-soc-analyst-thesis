@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel
 from elastic_transport import ApiError, TransportError
 
-from .config import Settings
+from .config import Settings, index_authorization_error, is_configured_index
 from .elastic_client import ElasticClient
 from .evidence import compact_alert, compact_event
 from .schemas import (
@@ -115,11 +115,7 @@ _BLOCKED_SOURCE_PREFIXES = (
 
 
 def _configured_index(settings: Settings, index: str) -> bool:
-    return index in {
-        settings.elastic_telemetry_indices,
-        settings.elastic_nginx_index,
-        settings.elastic_alert_index,
-    }
+    return is_configured_index(settings, index)
 
 
 def _validate_query_structure(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> None:
@@ -143,7 +139,7 @@ def _validate_query_structure(value: Any, *, depth: int = 0, nodes: list[int] | 
 
 def _validate_search_args(args: ElasticsearchSearchArgs, settings: Settings) -> None:
     if not _configured_index(settings, args.index):
-        raise ValueError("index is not configured for this application")
+        raise ValueError(index_authorization_error(settings, args.index))
     _validate_query_structure(args.query)
     if args.aggregations is not None:
         _validate_query_structure(args.aggregations)
@@ -222,20 +218,18 @@ def _compact_search_result(
     raw_hits = hits.get("hits", [])
     if not isinstance(raw_hits, list):
         raw_hits = []
-    compact_hits = [
-        {
-            "id": str(hit.get("_id", "")),
-            "evidence": compact_event(hit.get("_source", {}), source_fields),
-        }
+    documents = [
+        _compact_document(hit, source_fields)
         for hit in raw_hits
         if isinstance(hit, Mapping) and isinstance(hit.get("_source", {}), Mapping)
     ]
+    table = _compact_document_table(documents)
     result: dict[str, Any] = {
         "total_hits": total,
-        "returned_hits": len(compact_hits),
-        "sampled": total > len(compact_hits),
+        "returned_hits": len(documents),
+        "sampled": total > len(documents),
         "truncated": False,
-        "hits": compact_hits,
+        **table,
         "aggregations": _compact_generic_aggregations(response.get("aggregations", {})),
         "source_fields": source_fields,
         "omitted_fields": [
@@ -253,8 +247,10 @@ def _compact_search_result(
 
     result["truncated"] = True
     result["truncation_reason"] = "compact result exceeded MAX_TOOL_RESULT_BYTES"
-    result["omitted_hit_count"] = len(compact_hits)
-    result["hits"] = []
+    result["omitted_hit_count"] = len(documents)
+    result["columns"] = []
+    result["rows"] = []
+    result.pop("common_fields", None)
     if len(json.dumps(result, default=str, separators=(",", ":"))) <= max_bytes:
         return result
 
@@ -269,8 +265,93 @@ def _compact_search_result(
         "sampled": total > 0,
         "truncated": True,
         "truncation_reason": "compact result exceeded MAX_TOOL_RESULT_BYTES",
-        "omitted_hit_count": len(compact_hits),
+        "omitted_hit_count": len(documents),
         "omitted_aggregation_data": True,
+    }
+
+
+def _compact_document(hit: Mapping[str, Any], source_fields: list[str]) -> dict[str, Any]:
+    source = hit.get("_source", {})
+    if not isinstance(source, Mapping):
+        source = {}
+    values: dict[str, Any] = {"_id": _compact_table_value(str(hit.get("_id", "")))}
+    requested = [field_name for field_name in source_fields if "*" not in field_name]
+    if requested and not any("*" in field_name for field_name in source_fields):
+        for field_name in sorted(set(requested)):
+            value = _field_value(source, field_name)
+            if value is not None:
+                values[field_name] = _compact_table_value(value)
+    else:
+        for field_name, value in _flatten_document(source):
+            values[field_name] = _compact_table_value(value)
+    return values
+
+
+def _field_value(source: Mapping[str, Any], field_name: str) -> Any:
+    if field_name in source:
+        return source[field_name]
+    value: Any = source
+    for part in field_name.split("."):
+        if not isinstance(value, Mapping) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _flatten_document(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    if not isinstance(value, Mapping):
+        return [(prefix, value)] if prefix else []
+    fields: list[tuple[str, Any]] = []
+    for key, child in value.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if name.startswith(_BLOCKED_SOURCE_PREFIXES) or name.split(".", 1)[0] in {
+            "agent", "ecs", "input"
+        }:
+            continue
+        if isinstance(child, Mapping):
+            fields.extend(_flatten_document(child, name))
+        else:
+            fields.append((name, child))
+    return fields[:MAX_SOURCE_FIELDS]
+
+
+def _compact_table_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= 300 else f"{value[:300]}… [omitted]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        compacted = [_compact_table_value(item) for item in value[:10]]
+        result: dict[str, Any] = {"count": len(value), "representative": compacted}
+        if len(value) > len(compacted):
+            result["omitted_count"] = len(value) - len(compacted)
+        return result
+    if isinstance(value, Mapping):
+        return {
+            str(key): _compact_table_value(child)
+            for key, child in list(value.items())[:24]
+        }
+    return str(value)
+
+
+def _compact_document_table(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    if not documents:
+        return {"columns": [], "rows": []}
+    fields = sorted({field for document in documents for field in document})
+    common_fields: dict[str, Any] = {}
+    columns: list[str] = []
+    for field_name in fields:
+        values = [document.get(field_name) for document in documents]
+        if all(field_name in document for document in documents) and all(
+            value == values[0] for value in values[1:]
+        ) and field_name != "_id":
+            common_fields[field_name] = values[0]
+        else:
+            columns.append(field_name)
+    return {
+        "columns": columns,
+        "rows": [[document.get(field_name) for field_name in columns] for document in documents],
+        **({"common_fields": common_fields} if common_fields else {}),
     }
 
 
@@ -331,6 +412,12 @@ class InvestigationTools:
             size = min(args.size, self.settings.max_query_results)
             source_fields = args.source_fields or _EVENT_SOURCE_FIELDS
             sort = args.sort or [{"@timestamp": "asc"}, {"_shard_doc": "asc"}]
+            self.last_query = {
+                "index": args.index,
+                "query": args.query,
+                "size": size,
+                "aggregations": args.aggregations,
+            }
             response = self.elastic.search(
                 index=args.index,
                 query=args.query,
@@ -356,7 +443,7 @@ class InvestigationTools:
     def discover_fields(self, args: DiscoverFieldsArgs) -> ToolResult:
         try:
             if not _configured_index(self.settings, args.index):
-                raise ValueError("index is not configured for this application")
+                raise ValueError(index_authorization_error(self.settings, args.index))
             if args.field_prefix and len(args.field_prefix) > 200:
                 raise ValueError("field_prefix exceeds safety limits")
             pattern = f"{args.field_prefix}*" if args.field_prefix else "*"
@@ -526,9 +613,6 @@ class InvestigationTools:
 TOOL_NAMES = (
     "search_elasticsearch",
     "discover_fields",
-    "get_source_activity",
-    "get_http_statistics",
-    "get_related_alerts",
 )
 
 
@@ -554,27 +638,6 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "Elasticsearch index. Results are bounded."
             ),
             "parameters": strict_json_schema(DiscoverFieldsArgs),
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "get_source_activity",
-            "description": "Retrieve bounded telemetry activity from an alert source IP.",
-            "parameters": strict_json_schema(SourceActivityArgs),
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "get_http_statistics",
-            "description": "Calculate bounded HTTP request statistics for a source IP.",
-            "parameters": strict_json_schema(HttpStatisticsArgs),
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "get_related_alerts",
-            "description": "Find related Elastic Security alerts by source IP or host.",
-            "parameters": strict_json_schema(RelatedAlertsArgs),
             "strict": True,
         },
     ]

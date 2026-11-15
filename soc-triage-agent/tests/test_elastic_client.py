@@ -19,7 +19,8 @@ def test_search_rejects_unconfigured_index() -> None:
     try:
         client.search(index="arbitrary-*", query={"match_all": {}}, size=1)
     except ValueError as exc:
-        assert "not configured" in str(exc)
+        assert "arbitrary-*" in str(exc)
+        assert "logs-*" in str(exc)
     else:
         raise AssertionError("unconfigured index was accepted")
 

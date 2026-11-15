@@ -44,11 +44,11 @@ def settings(**overrides) -> Settings:
 def test_agent_supports_sequential_tool_calling_and_maps_action() -> None:
     openai = Mock()
     openai.responses.create.side_effect = [
-        response([function_call("get_source_activity", {
-            "source_ip": "192.0.2.10",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-01T00:01:00Z",
-            "max_events": 2,
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*",
+            "query": {"term": {"source.ip": "192.0.2.10"}},
+            "source_fields": ["@timestamp", "source.ip"],
+            "size": 2,
         })], response_id="response-1"),
         response([], json.dumps({
             "assessment": "true_positive",
@@ -61,8 +61,8 @@ def test_agent_supports_sequential_tool_calling_and_maps_action() -> None:
         })),
     ]
     tools = Mock()
-    tools.get_source_activity.return_value = ToolResult(
-        tool_name="get_source_activity", ok=True, data={"total": {"value": 2}, "events": []}
+    tools.search_elasticsearch.return_value = ToolResult(
+        tool_name="search_elasticsearch", ok=True, data={"total_hits": 2, "columns": [], "rows": []}
     )
     report = TriageAgent(settings(log_llm_requests=True), tools, openai).run(alert())
 
@@ -72,7 +72,7 @@ def test_agent_supports_sequential_tool_calling_and_maps_action() -> None:
     assert report.tool_call_count == 1
     assert report.model_request_count == 2
     assert openai.responses.create.call_count == 2
-    assert tools.get_source_activity.call_count == 1
+    assert tools.search_elasticsearch.call_count == 1
 
 
 def test_unknown_tool_and_invalid_arguments_are_returned_to_model() -> None:
@@ -80,7 +80,7 @@ def test_unknown_tool_and_invalid_arguments_are_returned_to_model() -> None:
     openai.responses.create.side_effect = [
         response([
             function_call("not_allowed", {}),
-            function_call("get_http_statistics", {"source_ip": "not-an-ip", "start": "bad", "end": "bad"}, "call-2"),
+            function_call("get_http_statistics", {}, "call-2"),
         ]),
         response([], json.dumps({
             "assessment": "uncertain",
@@ -98,7 +98,7 @@ def test_unknown_tool_and_invalid_arguments_are_returned_to_model() -> None:
     assert report.proposed_action == "ESCALATE"
     follow_up = openai.responses.create.call_args_list[1].kwargs["input"]
     assert "unknown tool" in follow_up[2]["output"]
-    assert "invalid tool arguments" in follow_up[3]["output"]
+    assert "unknown tool" in follow_up[3]["output"]
 
 
 def test_malformed_model_output_and_budget_exhaustion_escalate_safely() -> None:
@@ -120,17 +120,13 @@ def test_malformed_model_output_and_budget_exhaustion_escalate_safely() -> None:
 def test_invalid_window_is_returned_and_valid_retry_can_continue_with_previous_response() -> None:
     openai = Mock()
     openai.responses.create.side_effect = [
-        response([function_call("get_source_activity", {
-            "source_ip": "192.0.2.10",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-01T02:00:00Z",
-            "max_events": 2,
+        response([function_call("search_elasticsearch", {
+            "index": "not-approved",
+            "query": {"match_all": {}},
         })], response_id="response-1"),
-        response([function_call("get_source_activity", {
-            "source_ip": "192.0.2.10",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-01T00:01:00Z",
-            "max_events": 2,
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*",
+            "query": {"match_all": {}},
         }, "call-2")], response_id="response-2"),
         response([], json.dumps({
             "assessment": "true_positive",
@@ -152,14 +148,14 @@ def test_invalid_window_is_returned_and_valid_retry_can_continue_with_previous_r
     assert report.assessment == "true_positive"
     assert report.tool_call_count == 2
     assert elastic.search.call_count == 1
-    assert "no longer than 30 minutes" in openai.responses.create.call_args_list[0].kwargs["input"]
-    assert "centered on the alert timestamp" in openai.responses.create.call_args_list[0].kwargs["input"]
+    assert '"logs-*"' in openai.responses.create.call_args_list[0].kwargs["input"]
+    assert '".alerts-security.alerts-default"' in openai.responses.create.call_args_list[0].kwargs["input"]
     second_request = openai.responses.create.call_args_list[1].kwargs
     assert second_request["previous_response_id"] == "response-1"
     assert second_request["input"] == [{
         "type": "function_call_output",
         "call_id": "call-1",
-        "output": '{"tool_name":"get_source_activity","ok":false,"data":{},"error":"time window exceeds MAX_QUERY_WINDOW_MINUTES"}',
+        "output":         '{"tool_name":"search_elasticsearch","ok":false,"data":{},"error":"index \'not-approved\' is not authorized; permitted index patterns: logs-*, logs-nginx.access-*, .alerts-security.alerts-default"}',
     }]
     third_request = openai.responses.create.call_args_list[2].kwargs
     assert third_request["previous_response_id"] == "response-2"
@@ -181,11 +177,11 @@ def test_openai_api_failure_is_a_failed_uncertain_investigation() -> None:
 def test_follow_up_openai_payload_contains_compact_tool_evidence() -> None:
     openai = Mock()
     openai.responses.create.side_effect = [
-        response([function_call("get_source_activity", {
-            "source_ip": "192.0.2.10",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-01T00:01:00Z",
-            "max_events": 10,
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*",
+            "query": {"match_all": {}},
+            "source_fields": ["@timestamp", "process.name", "process.command_line"],
+            "size": 10,
         })], response_id="response-1"),
         response([], json.dumps({
             "assessment": "uncertain",
@@ -225,7 +221,7 @@ def test_follow_up_openai_payload_contains_compact_tool_evidence() -> None:
     assert "powershell.exe" in tool_output
     assert "filebeat" not in tool_output
     assert "raw document" not in tool_output
-    assert "unmapped source fields" in tool_output
+    assert "unrequested source fields" in tool_output
 
 
 def test_initial_context_limits_rule_description() -> None:
@@ -301,6 +297,10 @@ def test_assembled_openai_payload_uses_strict_structured_output_schemas() -> Non
     TriageAgent(settings(), Mock(), openai).run(alert())
 
     payload = openai.responses.create.call_args.kwargs
+    assert [tool["name"] for tool in payload["tools"]] == [
+        "search_elasticsearch",
+        "discover_fields",
+    ]
     for tool in payload["tools"]:
         schema = tool["parameters"]
         if tool["strict"]:
@@ -310,9 +310,6 @@ def test_assembled_openai_payload_uses_strict_structured_output_schemas() -> Non
     generic = next(tool for tool in payload["tools"] if tool["name"] == "search_elasticsearch")
     assert generic["strict"] is False
     assert generic["parameters"]["properties"]["query"]["type"] == "object"
-    related = next(tool for tool in payload["tools"] if tool["name"] == "get_related_alerts")
-    assert any(option.get("type") == "null" for option in
-               related["parameters"]["properties"]["source_ip"]["anyOf"])
     output_schema = payload["text"]["format"]["schema"]
     assert output_schema["additionalProperties"] is False
     assert set(output_schema["required"]) == set(output_schema["properties"])

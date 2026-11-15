@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -99,3 +100,28 @@ class Settings(BaseModel):
             if value is not None and value != "":
                 values[field_name] = value
         return cls.model_validate(values)
+
+
+def configured_index_patterns(settings: Settings) -> tuple[str, ...]:
+    """Return the configured Elasticsearch scopes in stable order."""
+    return tuple(dict.fromkeys((
+        settings.elastic_telemetry_indices,
+        settings.elastic_nginx_index,
+        settings.elastic_alert_index,
+    )))
+
+
+def is_configured_index(settings: Settings, index: str) -> bool:
+    """Allow configured patterns or concrete indices matched by those patterns."""
+    if index in configured_index_patterns(settings):
+        return True
+    if any(character in index for character in "*?["):
+        return False
+    return any(fnmatchcase(index, pattern) for pattern in configured_index_patterns(settings))
+
+
+def index_authorization_error(settings: Settings, index: str) -> str:
+    permitted = ", ".join(configured_index_patterns(settings))
+    return (
+        f"index {index!r} is not authorized; permitted index patterns: {permitted}"
+    )

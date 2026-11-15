@@ -209,7 +209,14 @@ def test_generic_search_selects_http_filters_and_aggregations() -> None:
     assert result.ok is True
     assert result.data["total_hits"] == 20
     assert result.data["sampled"] is True
-    assert result.data["hits"][0]["evidence"]["selected_fields"]["url.path"] == "/admin"
+    assert result.data["columns"] == ["_id"]
+    assert result.data["rows"][0] == ["http-1"]
+    assert result.data["common_fields"] == {
+        "@timestamp": "2026-01-01T00:00:00Z",
+        "http.request.method": "GET",
+        "source.ip": "192.0.2.10",
+        "url.path": "/admin",
+    }
     assert result.data["aggregations"]["by_status"]["buckets"][0] == {
         "key": 404,
         "count": 20,
@@ -265,9 +272,45 @@ def test_generic_search_supports_authentication_and_process_datasets() -> None:
         source_fields=["@timestamp", "process.name", "process.command_line"],
     ))
 
-    assert auth.data["hits"][0]["evidence"]["selected_fields"]["event.outcome"] == "failure"
-    assert process.data["hits"][0]["evidence"]["selected_fields"]["process.command_line"].startswith("curl ")
+    assert auth.data["rows"][0] == ["auth-1"]
+    assert auth.data["common_fields"] == {
+        "@timestamp": "2026-01-01T00:00:00Z",
+        "event.category": {"count": 1, "representative": ["authentication"]},
+        "event.outcome": "failure",
+        "user.name": "alice",
+    }
+    assert process.data["rows"][0] == ["process-1"]
+    assert process.data["common_fields"]["process.command_line"].startswith("curl ")
     assert elastic.search.call_args_list[0].kwargs["query"] != elastic.search.call_args_list[1].kwargs["query"]
+
+
+def test_generic_search_allows_configured_security_alert_index() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {
+            "total": {"value": 1},
+            "hits": [{
+                "_id": "alert-1",
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "kibana.alert.rule.name": "Suspicious login",
+                    "kibana.alert.severity": "high",
+                },
+            }],
+        }
+    }
+
+    result = InvestigationTools(elastic, Settings()).search_elasticsearch(
+        ElasticsearchSearchArgs(
+            index=".alerts-security.alerts-default",
+            query={"term": {"kibana.alert.severity": "high"}},
+            source_fields=["@timestamp", "kibana.alert.rule.name", "kibana.alert.severity"],
+        )
+    )
+
+    assert result.ok is True
+    assert result.data["common_fields"]["kibana.alert.rule.name"] == "Suspicious login"
+    assert elastic.search.call_args.kwargs["index"] == ".alerts-security.alerts-default"
 
 
 def test_generic_search_rejects_unsafe_queries_and_bad_sorting() -> None:
@@ -307,7 +350,7 @@ def test_generic_search_enforces_serialized_response_limit() -> None:
                 "_id": str(index),
                 "_source": {
                     "@timestamp": "2026-01-01T00:00:00Z",
-                    "process.command_line": "suspicious command " * 100,
+                    "process.command_line": f"suspicious command {index} " * 100,
                 },
             } for index in range(25)],
         }
@@ -348,3 +391,28 @@ def test_field_discovery_is_bounded_and_reports_truncation() -> None:
     assert result.data["returned_fields"] == 2
     assert result.data["truncated"] is True
     assert elastic.field_caps.call_args.kwargs["fields"] == ["*"]
+
+
+def test_field_discovery_allows_configured_patterns_and_matching_concrete_indices() -> None:
+    elastic = Mock()
+    elastic.field_caps.return_value = {"fields": {}}
+    tools = InvestigationTools(elastic, Settings())
+
+    for index in ("logs-*", "logs-endpoint.events-2026.11.15", ".alerts-security.alerts-default"):
+        result = tools.discover_fields(DiscoverFieldsArgs(index=index))
+        assert result.ok is True
+
+    assert elastic.field_caps.call_count == 3
+
+
+def test_field_discovery_rejects_unauthorized_index_with_safe_allowlist() -> None:
+    elastic = Mock()
+    tools = InvestigationTools(elastic, Settings())
+
+    result = tools.discover_fields(DiscoverFieldsArgs(index="metrics-system-2026.11.15"))
+
+    assert result.ok is False
+    assert "metrics-system-2026.11.15" in (result.error or "")
+    assert "logs-*" in (result.error or "")
+    assert ".alerts-security.alerts-default" in (result.error or "")
+    elastic.field_caps.assert_not_called()
