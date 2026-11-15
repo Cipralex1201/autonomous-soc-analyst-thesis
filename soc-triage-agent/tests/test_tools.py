@@ -391,6 +391,7 @@ def test_field_discovery_is_bounded_and_reports_truncation() -> None:
     assert result.data["returned_fields"] == 2
     assert result.data["truncated"] is True
     assert elastic.field_caps.call_args.kwargs["fields"] == ["*"]
+    assert elastic.field_caps.call_args.kwargs["request_timeout"] == 10
 
 
 def test_field_discovery_allows_configured_patterns_and_matching_concrete_indices() -> None:

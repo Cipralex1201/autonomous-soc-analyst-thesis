@@ -128,7 +128,7 @@ class ElasticClient:
         *,
         index: str,
         fields: list[str] | None = None,
-        timeout: str | None = None,
+        request_timeout: float | None = None,
     ) -> dict[str, Any]:
         """Return bounded field metadata for an explicitly configured index."""
         if not is_configured_index(self.settings, index):
@@ -137,9 +137,12 @@ class ElasticClient:
             "index": index,
             "fields": fields or ["*"],
         }
-        if timeout is not None:
-            request["timeout"] = timeout
-        return dict(self.client.field_caps(**request))
+        request_client = (
+            self.client.options(request_timeout=request_timeout)
+            if request_timeout is not None
+            else self.client
+        )
+        return dict(request_client.field_caps(**request))
 
 
 class ElasticAccessError(RuntimeError):

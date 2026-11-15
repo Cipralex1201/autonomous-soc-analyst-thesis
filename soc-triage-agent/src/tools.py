@@ -450,7 +450,7 @@ class InvestigationTools:
             response = self.elastic.field_caps(
                 index=args.index,
                 fields=[pattern],
-                timeout=f"{self.settings.elastic_search_timeout_seconds}s",
+                request_timeout=self.settings.elastic_search_timeout_seconds,
             )
             raw_fields = response.get("fields", {})
             if not isinstance(raw_fields, Mapping):

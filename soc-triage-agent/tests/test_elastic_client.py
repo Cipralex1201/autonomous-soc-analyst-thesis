@@ -71,3 +71,22 @@ def test_search_passes_source_filter_and_timeout_to_elasticsearch() -> None:
     assert request["_source"] == ["@timestamp", "process.name"]
     assert request["sort"] == [{"@timestamp": "asc"}]
     assert request["timeout"] == "10s"
+
+
+def test_field_caps_uses_client_request_timeout_not_field_caps_keyword() -> None:
+    client_api = Mock()
+    request_client = Mock()
+    request_client.field_caps.return_value = {"fields": {}}
+    client_api.options.return_value = request_client
+    client = ElasticClient(Settings(), client=client_api)
+
+    result = client.field_caps(
+        index="logs-*",
+        fields=["*"],
+        request_timeout=10,
+    )
+
+    assert result == {"fields": {}}
+    client_api.options.assert_called_once_with(request_timeout=10)
+    request_client.field_caps.assert_called_once_with(index="logs-*", fields=["*"])
+    client_api.field_caps.assert_not_called()
