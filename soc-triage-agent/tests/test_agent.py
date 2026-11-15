@@ -152,3 +152,32 @@ def test_large_alert_request_uses_compact_detection_context() -> None:
     assert "url_original_count_distinct" in request_input and "615" in request_input
     assert request_input.count("/path/") == 10
     assert len(request_input) < 3000
+
+
+def test_assembled_openai_payload_uses_strict_structured_output_schemas() -> None:
+    openai = Mock()
+    openai.responses.create.return_value = response([], json.dumps({
+        "assessment": "uncertain",
+        "severity": "low",
+        "confidence": 0,
+        "summary": "Insufficient evidence.",
+        "evidence": [],
+        "missing_evidence": [],
+        "recommended_next_steps": [],
+    }))
+
+    TriageAgent(settings(), Mock(), openai).run(alert())
+
+    payload = openai.responses.create.call_args.kwargs
+    for tool in payload["tools"]:
+        schema = tool["parameters"]
+        assert schema["additionalProperties"] is False
+        assert set(schema["required"]) == set(schema["properties"])
+        assert "default" not in schema["properties"].get("max_events", {})
+    related = next(tool for tool in payload["tools"] if tool["name"] == "get_related_alerts")
+    assert any(option.get("type") == "null" for option in
+               related["parameters"]["properties"]["source_ip"]["anyOf"])
+    output_schema = payload["text"]["format"]["schema"]
+    assert output_schema["additionalProperties"] is False
+    assert set(output_schema["required"]) == set(output_schema["properties"])
+    assert output_schema["properties"]["evidence"]["type"] == "array"

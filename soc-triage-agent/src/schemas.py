@@ -2,10 +2,44 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Adapt a Pydantic schema to OpenAI Structured Outputs strict mode."""
+    schema = copy.deepcopy(model.model_json_schema())
+    _make_strict(schema)
+    return schema
+
+
+def _make_strict(schema: dict[str, Any]) -> None:
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        schema["additionalProperties"] = False
+        schema["required"] = list(properties)
+        for name, property_schema in properties.items():
+            if isinstance(property_schema, dict):
+                _make_strict(property_schema)
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _make_strict(items)
+
+    for variant_key in ("anyOf", "allOf", "oneOf"):
+        variants = schema.get(variant_key)
+        if isinstance(variants, list):
+            for variant in variants:
+                if isinstance(variant, dict):
+                    _make_strict(variant)
+
+    for definition in schema.get("$defs", {}).values():
+        if isinstance(definition, dict):
+            _make_strict(definition)
+    schema.pop("default", None)
 
 
 class AlertContext(BaseModel):

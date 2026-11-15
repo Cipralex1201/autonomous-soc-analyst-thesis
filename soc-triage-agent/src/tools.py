@@ -16,6 +16,7 @@ from .schemas import (
     RelatedAlertsArgs,
     SourceActivityArgs,
     ToolResult,
+    strict_json_schema,
 )
 
 
@@ -139,21 +140,21 @@ def tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "name": "get_source_activity",
             "description": "Retrieve bounded telemetry activity from an alert source IP.",
-            "parameters": SourceActivityArgs.model_json_schema(),
+            "parameters": strict_json_schema(SourceActivityArgs),
             "strict": True,
         },
         {
             "type": "function",
             "name": "get_http_statistics",
             "description": "Calculate bounded HTTP request statistics for a source IP.",
-            "parameters": HttpStatisticsArgs.model_json_schema(),
+            "parameters": strict_json_schema(HttpStatisticsArgs),
             "strict": True,
         },
         {
             "type": "function",
             "name": "get_related_alerts",
             "description": "Find related Elastic Security alerts by source IP or host.",
-            "parameters": RelatedAlertsArgs.model_json_schema(),
+            "parameters": strict_json_schema(RelatedAlertsArgs),
             "strict": True,
         },
     ]

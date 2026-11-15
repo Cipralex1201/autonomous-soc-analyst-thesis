@@ -23,6 +23,7 @@ from .schemas import (
     TriageAssessment,
     TriageReport,
     ToolResult,
+    strict_json_schema,
 )
 from .tools import InvestigationTools, tool_definitions
 
@@ -71,7 +72,7 @@ class TriageAgent:
                         "format": {
                             "type": "json_schema",
                             "name": "triage_assessment",
-                            "schema": TriageAssessment.model_json_schema(),
+                            "schema": strict_json_schema(TriageAssessment),
                             "strict": True,
                         }
                     },
