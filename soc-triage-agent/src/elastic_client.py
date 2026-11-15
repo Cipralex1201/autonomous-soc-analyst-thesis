@@ -56,7 +56,7 @@ class ElasticClient:
         response = self.client.search(
             index=self.settings.elastic_alert_index,
             query=dict(query),
-            sort=[{"kibana.alert.original_time": "asc"}, {"_id": "asc"}],
+            sort=[{"kibana.alert.original_time": "asc"}, {"_shard_doc": "asc"}],
             size=min(size, 1000),
         )
         return [
@@ -98,6 +98,7 @@ class ElasticClient:
         aggregations: Mapping[str, Any] | None = None,
         source: list[str] | None = None,
         sort: list[Mapping[str, Any] | str] | None = None,
+        timeout: str | None = None,
     ) -> dict[str, Any]:
         """Execute an application-built query against an explicitly configured index."""
         if index not in {
@@ -118,10 +119,34 @@ class ElasticClient:
             request["_source"] = source
         if sort is not None:
             request["sort"] = sort
+        if timeout is not None:
+            request["timeout"] = timeout
         response = self.client.search(
             **request,
         )
         return dict(response)
+
+    def field_caps(
+        self,
+        *,
+        index: str,
+        fields: list[str] | None = None,
+        timeout: str | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded field metadata for an explicitly configured index."""
+        if index not in {
+            self.settings.elastic_telemetry_indices,
+            self.settings.elastic_nginx_index,
+            self.settings.elastic_alert_index,
+        }:
+            raise ValueError("index is not configured for this application")
+        request: dict[str, Any] = {
+            "index": index,
+            "fields": fields or ["*"],
+        }
+        if timeout is not None:
+            request["timeout"] = timeout
+        return dict(self.client.field_caps(**request))
 
 
 class ElasticAccessError(RuntimeError):

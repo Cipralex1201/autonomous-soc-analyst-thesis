@@ -21,6 +21,8 @@ class Settings(BaseModel):
     poll_interval_seconds: float = Field(default=5, gt=0)
     max_query_results: int = Field(default=100, gt=0, le=1000)
     max_query_window_minutes: int = Field(default=30, gt=0, le=1440)
+    max_tool_result_bytes: int = Field(default=20000, gt=1000, le=1_000_000)
+    elastic_search_timeout_seconds: int = Field(default=10, gt=0, le=120)
     log_level: str = "INFO"
     openai_api_key: str | None = None
     openai_model: str | None = None
@@ -78,6 +80,8 @@ class Settings(BaseModel):
             "POLL_INTERVAL_SECONDS": "poll_interval_seconds",
             "MAX_QUERY_RESULTS": "max_query_results",
             "MAX_QUERY_WINDOW_MINUTES": "max_query_window_minutes",
+            "MAX_TOOL_RESULT_BYTES": "max_tool_result_bytes",
+            "ELASTIC_SEARCH_TIMEOUT_SECONDS": "elastic_search_timeout_seconds",
             "LOG_LEVEL": "log_level",
             "OPENAI_API_KEY": "openai_api_key",
             "OPENAI_MODEL": "openai_model",

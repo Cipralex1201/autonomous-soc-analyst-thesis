@@ -17,6 +17,8 @@ from .observability import inspect_request, sanitize
 from .prompts import alert_input, load_system_prompt
 from .schemas import (
     AlertContext,
+    DiscoverFieldsArgs,
+    ElasticsearchSearchArgs,
     HttpStatisticsArgs,
     RelatedAlertsArgs,
     SourceActivityArgs,
@@ -134,6 +136,8 @@ class TriageAgent:
                 sanitize(raw_arguments),
             )
         models = {
+            "search_elasticsearch": (ElasticsearchSearchArgs, self.tools.search_elasticsearch),
+            "discover_fields": (DiscoverFieldsArgs, self.tools.discover_fields),
             "get_source_activity": (SourceActivityArgs, self.tools.get_source_activity),
             "get_http_statistics": (HttpStatisticsArgs, self.tools.get_http_statistics),
             "get_related_alerts": (RelatedAlertsArgs, self.tools.get_related_alerts),

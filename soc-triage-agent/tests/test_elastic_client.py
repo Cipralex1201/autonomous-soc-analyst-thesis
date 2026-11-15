@@ -37,3 +37,36 @@ def test_read_access_uses_alert_index_search_without_ping() -> None:
         track_total_hits=False,
     )
     client_api.ping.assert_not_called()
+
+
+def test_alert_search_uses_supported_shard_sort_instead_of_id_sort() -> None:
+    client_api = Mock()
+    client_api.search.return_value = {"hits": {"hits": []}}
+    client = ElasticClient(Settings(), client=client_api)
+
+    client.search_alerts(query={"match_all": {}}, size=10)
+
+    assert client_api.search.call_args.kwargs["sort"] == [
+        {"kibana.alert.original_time": "asc"},
+        {"_shard_doc": "asc"},
+    ]
+
+
+def test_search_passes_source_filter_and_timeout_to_elasticsearch() -> None:
+    client_api = Mock()
+    client_api.search.return_value = {"hits": {"hits": []}}
+    client = ElasticClient(Settings(), client=client_api)
+
+    client.search(
+        index="logs-*",
+        query={"match_all": {}},
+        size=10,
+        source=["@timestamp", "process.name"],
+        sort=[{"@timestamp": "asc"}],
+        timeout="10s",
+    )
+
+    request = client_api.search.call_args.kwargs
+    assert request["_source"] == ["@timestamp", "process.name"]
+    assert request["sort"] == [{"@timestamp": "asc"}]
+    assert request["timeout"] == "10s"

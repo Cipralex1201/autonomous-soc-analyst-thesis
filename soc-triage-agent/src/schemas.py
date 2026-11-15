@@ -97,6 +97,21 @@ class RelatedAlertsArgs(BaseModel):
         return self
 
 
+class ElasticsearchSearchArgs(BaseModel):
+    index: str
+    query: dict[str, Any]
+    aggregations: dict[str, Any] | None = None
+    source_fields: list[str] | None = None
+    sort: list[dict[str, Any]] | None = None
+    size: int = Field(default=25, gt=0, le=1000)
+
+
+class DiscoverFieldsArgs(BaseModel):
+    index: str
+    field_prefix: str | None = None
+    max_fields: int = Field(default=100, gt=0, le=500)
+
+
 class ToolResult(BaseModel):
     tool_name: str
     ok: bool

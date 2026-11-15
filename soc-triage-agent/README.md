@@ -48,7 +48,14 @@ and sends the bounded result back in a follow-up Responses API call using the
 Responses conversation state and matching function-call IDs. Query windows are
 limited by `MAX_QUERY_WINDOW_MINUTES`; rejected arguments are returned to the
 model so it can retry within that limit. Arbitrary Elasticsearch DSL and shell
-execution are not available.
+execution are not available; generic Query DSL is accepted only through the
+validated read-only search tool.
+
+For general investigations the model can use `discover_fields` followed by
+`search_elasticsearch`. The latter accepts read-only Query DSL, selected
+source fields, sorting, and aggregations; Python validates allowed indices,
+rejects unsafe/resource-intensive features, applies the Elasticsearch timeout,
+and bounds the serialized result with `MAX_TOOL_RESULT_BYTES`.
 
 SIEM tool results are normalized before they reach the model. Telemetry uses
 common ECS fields plus bounded detection-specific evidence; HTTP statistics

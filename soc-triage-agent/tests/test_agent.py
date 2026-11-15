@@ -303,9 +303,13 @@ def test_assembled_openai_payload_uses_strict_structured_output_schemas() -> Non
     payload = openai.responses.create.call_args.kwargs
     for tool in payload["tools"]:
         schema = tool["parameters"]
-        assert schema["additionalProperties"] is False
-        assert set(schema["required"]) == set(schema["properties"])
-        assert "default" not in schema["properties"].get("max_events", {})
+        if tool["strict"]:
+            assert schema["additionalProperties"] is False
+            assert set(schema["required"]) == set(schema["properties"])
+            assert "default" not in schema["properties"].get("max_events", {})
+    generic = next(tool for tool in payload["tools"] if tool["name"] == "search_elasticsearch")
+    assert generic["strict"] is False
+    assert generic["parameters"]["properties"]["query"]["type"] == "object"
     related = next(tool for tool in payload["tools"] if tool["name"] == "get_related_alerts")
     assert any(option.get("type") == "null" for option in
                related["parameters"]["properties"]["source_ip"]["anyOf"])

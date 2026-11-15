@@ -2,7 +2,13 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 from src.config import Settings
-from src.schemas import HttpStatisticsArgs, RelatedAlertsArgs, SourceActivityArgs
+from src.schemas import (
+    DiscoverFieldsArgs,
+    ElasticsearchSearchArgs,
+    HttpStatisticsArgs,
+    RelatedAlertsArgs,
+    SourceActivityArgs,
+)
 from src.tools import InvestigationTools
 
 
@@ -79,7 +85,7 @@ def test_source_activity_compacts_large_filebeat_and_non_http_documents() -> Non
     assert "ecs" not in event
     assert "message" not in event
     assert elastic.search.call_args.kwargs["source"]
-    assert elastic.search.call_args.kwargs["sort"] == [{"@timestamp": "asc"}, {"_id": "asc"}]
+    assert elastic.search.call_args.kwargs["sort"] == [{"@timestamp": "asc"}, {"_shard_doc": "asc"}]
 
 
 def test_http_statistics_returns_readable_compact_aggregates() -> None:
@@ -165,3 +171,180 @@ def test_related_alerts_exclude_rule_guides_and_keep_detection_evidence() -> Non
     }
     assert "investigation guide" not in str(result.data)
     assert "full detection query" not in str(result.data)
+
+
+def test_generic_search_selects_http_filters_and_aggregations() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {
+            "total": {"value": 20, "relation": "eq"},
+            "hits": [{
+                "_id": "http-1",
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "source.ip": "192.0.2.10",
+                    "http.request.method": "GET",
+                    "url.path": "/admin",
+                    "http.response.status_code": 404,
+                },
+            }],
+        },
+        "aggregations": {
+            "by_status": {
+                "buckets": [{"key": 404, "doc_count": 20}],
+            }
+        },
+    }
+    tools = InvestigationTools(elastic, Settings())
+    args = ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"bool": {"filter": [{"term": {"source.ip": "192.0.2.10"}}]}},
+        aggregations={"by_status": {"terms": {"field": "http.response.status_code", "size": 5}}},
+        source_fields=["@timestamp", "source.ip", "http.request.method", "url.path"],
+        size=10,
+    )
+
+    result = tools.search_elasticsearch(args)
+
+    assert result.ok is True
+    assert result.data["total_hits"] == 20
+    assert result.data["sampled"] is True
+    assert result.data["hits"][0]["evidence"]["selected_fields"]["url.path"] == "/admin"
+    assert result.data["aggregations"]["by_status"]["buckets"][0] == {
+        "key": 404,
+        "count": 20,
+    }
+    request = elastic.search.call_args.kwargs
+    assert request["query"] == args.query
+    assert request["aggregations"] == args.aggregations
+    assert request["timeout"] == "10s"
+
+
+def test_generic_search_supports_authentication_and_process_datasets() -> None:
+    elastic = Mock()
+    elastic.search.side_effect = [
+        {
+            "hits": {
+                "total": {"value": 1},
+                "hits": [{
+                    "_id": "auth-1",
+                    "_source": {
+                        "@timestamp": "2026-01-01T00:00:00Z",
+                        "event.category": ["authentication"],
+                        "event.outcome": "failure",
+                        "user.name": "alice",
+                    },
+                }],
+            }
+        },
+        {
+            "hits": {
+                "total": {"value": 1},
+                "hits": [{
+                    "_id": "process-1",
+                    "_source": {
+                        "@timestamp": "2026-01-01T00:01:00Z",
+                        "event.category": ["process"],
+                        "process.command_line": "curl http://example.test",
+                        "process.name": "curl",
+                    },
+                }],
+            }
+        },
+    ]
+    tools = InvestigationTools(elastic, Settings())
+
+    auth = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"term": {"event.category": "authentication"}},
+        source_fields=["@timestamp", "event.category", "event.outcome", "user.name"],
+    ))
+    process = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"term": {"event.category": "process"}},
+        source_fields=["@timestamp", "process.name", "process.command_line"],
+    ))
+
+    assert auth.data["hits"][0]["evidence"]["selected_fields"]["event.outcome"] == "failure"
+    assert process.data["hits"][0]["evidence"]["selected_fields"]["process.command_line"].startswith("curl ")
+    assert elastic.search.call_args_list[0].kwargs["query"] != elastic.search.call_args_list[1].kwargs["query"]
+
+
+def test_generic_search_rejects_unsafe_queries_and_bad_sorting() -> None:
+    elastic = Mock()
+    tools = InvestigationTools(elastic, Settings())
+
+    unsafe = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"bool": {"must": [{"script": {"source": "doc['x'].value"}}]}},
+    ))
+    bad_sort = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"match_all": {}},
+        sort=[{"_id": "asc"}],
+    ))
+    blocked_source = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"match_all": {}},
+        source_fields=["kibana.alert.rule.parameters.note"],
+    ))
+
+    assert unsafe.ok is False
+    assert "not permitted" in (unsafe.error or "")
+    assert bad_sort.ok is False
+    assert "_id" in (bad_sort.error or "")
+    assert blocked_source.ok is False
+    assert "source field" in (blocked_source.error or "")
+    elastic.search.assert_not_called()
+
+
+def test_generic_search_enforces_serialized_response_limit() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {
+            "total": {"value": 100},
+            "hits": [{
+                "_id": str(index),
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "process.command_line": "suspicious command " * 100,
+                },
+            } for index in range(25)],
+        }
+    }
+    settings = Settings(max_tool_result_bytes=1500)
+    result = InvestigationTools(elastic, settings).search_elasticsearch(
+        ElasticsearchSearchArgs(
+            index="logs-*",
+            query={"match_all": {}},
+            source_fields=["@timestamp", "process.command_line"],
+            size=25,
+        )
+    )
+
+    import json
+    assert result.ok is True
+    assert result.data["truncated"] is True
+    assert result.data["omitted_hit_count"] == 25
+    assert len(json.dumps(result.data, separators=(",", ":"))) <= 1500
+
+
+def test_field_discovery_is_bounded_and_reports_truncation() -> None:
+    elastic = Mock()
+    elastic.field_caps.return_value = {
+        "fields": {
+            f"custom.field.{index}": {
+                "keyword": {"searchable": True, "aggregatable": True}
+            }
+            for index in range(5)
+        }
+    }
+
+    result = InvestigationTools(elastic, Settings()).discover_fields(
+        DiscoverFieldsArgs(index="logs-*", max_fields=2)
+    )
+
+    assert result.data["field_count"] == 5
+    assert result.data["returned_fields"] == 2
+    assert result.data["truncated"] is True
+    assert elastic.field_caps.call_args.kwargs["fields"] == ["*"]

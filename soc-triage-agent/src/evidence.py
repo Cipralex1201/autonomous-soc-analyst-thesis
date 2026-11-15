@@ -41,7 +41,10 @@ def field(source: Mapping[str, Any], *path: str) -> Any:
     return value
 
 
-def compact_event(source: Mapping[str, Any]) -> dict[str, Any]:
+def compact_event(
+    source: Mapping[str, Any],
+    selected_fields: list[str] | None = None,
+) -> dict[str, Any]:
     """Normalize an event to useful ECS and detection evidence fields."""
     result: dict[str, Any] = {}
     fields = {
@@ -82,6 +85,16 @@ def compact_event(source: Mapping[str, Any]) -> dict[str, Any]:
     evidence = compact_detection_evidence(source)
     if evidence:
         result["detection_evidence"] = evidence
+    if selected_fields:
+        selected: dict[str, Any] = {}
+        for field_name in sorted(set(selected_fields)):
+            if "*" in field_name:
+                continue
+            value = field(source, *field_name.split("."))
+            if value is not None:
+                selected[field_name] = _compact_scalar(value)
+        if selected:
+            result["selected_fields"] = selected
     return result
 
 
@@ -129,8 +142,7 @@ def compact_detection_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
                     url_values.extend(item for item in child if isinstance(item, str))
                 if (
                     namespace is None
-                    and
-                    child_namespace in _EVIDENCE_NAMESPACES
+                    and child_namespace in _EVIDENCE_NAMESPACES
                     and child_namespace not in _NOISY_NAMESPACES
                     and child_namespace not in custom
                 ):
