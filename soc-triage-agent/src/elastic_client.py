@@ -9,60 +9,8 @@ from elasticsearch import Elasticsearch
 from elastic_transport import ApiError, TransportError
 
 from .config import Settings
+from .evidence import compact_detection_evidence, field
 from .schemas import AlertContext
-
-
-def _nested(source: Mapping[str, Any], *path: str) -> Any:
-    value: Any = source
-    for key in path:
-        if not isinstance(value, Mapping):
-            return None
-        value = value.get(key)
-    return value
-
-
-def _field(source: Mapping[str, Any], *path: str) -> Any:
-    """Read ECS fields whether Elasticsearch returned dotted or nested keys."""
-    dotted = ".".join(path)
-    if dotted in source:
-        return source[dotted]
-    return _nested(source, *path)
-
-
-def _detection_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract bounded, rule-agnostic evidence fields from an alert document."""
-    event_count: Any = None
-    distinct_url_count: Any = None
-    url_paths: list[str] = []
-
-    def visit(value: Any) -> None:
-        nonlocal event_count, distinct_url_count
-        if isinstance(value, Mapping):
-            for key, child in value.items():
-                normalized = str(key).lower().replace(".", "_")
-                if normalized.endswith("event_count") and isinstance(child, (int, float)):
-                    event_count = child
-                elif normalized.endswith("url_original_count_distinct") and isinstance(child, (int, float)):
-                    distinct_url_count = child
-                elif "url_original" in normalized and isinstance(child, list):
-                    url_paths.extend(item for item in child if isinstance(item, str))
-                visit(child)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-
-    visit(source)
-    evidence: dict[str, Any] = {}
-    if event_count is not None:
-        evidence["event_count"] = event_count
-    if distinct_url_count is not None:
-        evidence["url_original_count_distinct"] = distinct_url_count
-    if url_paths:
-        evidence["url_path_total_count"] = (
-            distinct_url_count if distinct_url_count is not None else len(url_paths)
-        )
-        evidence["representative_url_paths"] = url_paths[:10]
-    return evidence
 
 
 class ElasticClient:
@@ -124,20 +72,20 @@ class ElasticClient:
             event_ids = [event_ids]
         return AlertContext(
             alert_id=alert_id,
-            rule_name=_field(source, "kibana", "alert", "rule", "name")
-            or _field(source, "kibana", "alert", "rule", "rule_name"),
-            rule_description=_field(source, "kibana", "alert", "rule", "description"),
-            detected_at=source.get("@timestamp") or _field(source, "kibana", "alert", "original_time"),
-            severity=_field(source, "kibana", "alert", "severity"),
-            risk_score=_field(source, "kibana", "alert", "risk_score"),
-            source_ip=_field(source, "source", "ip"),
-            destination_ip=_field(source, "destination", "ip"),
-            host_name=_field(source, "host", "name"),
-            user_name=_field(source, "user", "name"),
+            rule_name=field(source, "kibana", "alert", "rule", "name")
+            or field(source, "kibana", "alert", "rule", "rule_name"),
+            rule_description=field(source, "kibana", "alert", "rule", "description"),
+            detected_at=source.get("@timestamp") or field(source, "kibana", "alert", "original_time"),
+            severity=field(source, "kibana", "alert", "severity"),
+            risk_score=field(source, "kibana", "alert", "risk_score"),
+            source_ip=field(source, "source", "ip"),
+            destination_ip=field(source, "destination", "ip"),
+            host_name=field(source, "host", "name"),
+            user_name=field(source, "user", "name"),
             event_ids=list(event_ids),
-            detection_evidence=_detection_evidence(source),
+            detection_evidence=compact_detection_evidence(source),
             metadata={
-                "event_kind": _field(source, "event", "kind"),
+                "event_kind": field(source, "event", "kind"),
             },
         )
 
@@ -148,6 +96,8 @@ class ElasticClient:
         query: Mapping[str, Any],
         size: int,
         aggregations: Mapping[str, Any] | None = None,
+        source: list[str] | None = None,
+        sort: list[Mapping[str, Any] | str] | None = None,
     ) -> dict[str, Any]:
         """Execute an application-built query against an explicitly configured index."""
         if index not in {
@@ -164,6 +114,10 @@ class ElasticClient:
         }
         if aggregations:
             request["aggregations"] = dict(aggregations)
+        if source is not None:
+            request["_source"] = source
+        if sort is not None:
+            request["sort"] = sort
         response = self.client.search(
             **request,
         )

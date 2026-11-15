@@ -106,6 +106,7 @@ class ToolResult(BaseModel):
 
 Assessment = Literal["true_positive", "false_positive", "uncertain"]
 ProposedAction = Literal["ESCALATE", "CLOSE"]
+ExecutionStatus = Literal["completed", "failed"]
 
 
 class TriageAssessment(BaseModel):
@@ -121,6 +122,7 @@ class TriageAssessment(BaseModel):
 class TriageReport(BaseModel):
     alert_id: str
     investigation_id: str
+    execution_status: ExecutionStatus
     assessment: Assessment
     proposed_action: ProposedAction
     severity: str

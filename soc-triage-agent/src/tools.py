@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from elastic_transport import ApiError, TransportError
 
 from .config import Settings
 from .elastic_client import ElasticClient
+from .evidence import compact_alert, compact_event
 from .schemas import (
     HttpStatisticsArgs,
     RelatedAlertsArgs,
@@ -48,23 +50,145 @@ def _total_value(total: Any) -> int:
     return int(total or 0)
 
 
+_EVENT_SOURCE_FIELDS = [
+    "@timestamp",
+    "event.*",
+    "source.*",
+    "destination.*",
+    "host.name",
+    "user.name",
+    "http.*",
+    "url.*",
+    "user_agent.original",
+    "process.*",
+    "file.*",
+    "dns.*",
+    "network.*",
+    "authentication.*",
+    "Esql.*",
+    "detection.*",
+    "threat.*",
+]
+_ALERT_SOURCE_FIELDS = [
+    "@timestamp",
+    "kibana.alert.rule.name",
+    "kibana.alert.rule.rule_name",
+    "kibana.alert.severity",
+    "kibana.alert.risk_score",
+    "kibana.alert.original_time",
+    "source.*",
+    "destination.*",
+    "host.name",
+    "user.name",
+    "event.*",
+    "authentication.*",
+    "Esql.*",
+    "detection.*",
+    "threat.*",
+]
+
+
+def _compact_buckets(
+    aggregations: Mapping[str, Any],
+    name: str,
+    value_name: str,
+) -> dict[str, Any]:
+    aggregation = aggregations.get(name, {})
+    if not isinstance(aggregation, Mapping):
+        return {"values": []}
+    values = []
+    for bucket in aggregation.get("buckets", []):
+        if not isinstance(bucket, Mapping):
+            continue
+        value = bucket.get("key_as_string", bucket.get("key"))
+        values.append({value_name: value, "count": bucket.get("doc_count", 0)})
+    result: dict[str, Any] = {"values": values}
+    omitted = aggregation.get("sum_other_doc_count")
+    if omitted:
+        result["omitted_count"] = omitted
+    return result
+
+
+def _compact_http_statistics(response: Mapping[str, Any]) -> dict[str, Any]:
+    aggregations = response.get("aggregations", {})
+    if not isinstance(aggregations, Mapping):
+        aggregations = {}
+    unique_paths = aggregations.get("unique_paths", {})
+    unique_url_count = unique_paths.get("value", 0) if isinstance(unique_paths, Mapping) else 0
+    return {
+        "total_requests": _total_value(response.get("hits", {}).get("total", 0)),
+        "unique_url_count": unique_url_count,
+        "status_counts": _compact_buckets(aggregations, "status_codes", "status_code"),
+        "noteworthy_paths": _compact_buckets(aggregations, "common_paths", "path"),
+        "user_agent_counts": _compact_buckets(aggregations, "user_agents", "user_agent"),
+        "requests_over_time": _compact_buckets(
+            aggregations, "requests_over_time", "timestamp"
+        ),
+        "aggregation_note": (
+            "Path, status, and user-agent values are top aggregation buckets; "
+            "omitted counts are reported where Elasticsearch provides them. "
+            "Raw Elasticsearch aggregation metadata is omitted."
+        ),
+        "omitted_fields": ["raw aggregation metadata", "unbucketed document fields"],
+    }
+
+
 class InvestigationTools:
     def __init__(self, elastic: ElasticClient, settings: Settings) -> None:
         self.elastic = elastic
         self.settings = settings
         self.last_query: dict[str, Any] | None = None
 
-    def _execute(self, name: str, args: BaseModel, query: dict[str, Any], size: int, index: str) -> ToolResult:
+    def _execute(
+        self,
+        name: str,
+        args: BaseModel,
+        query: dict[str, Any],
+        size: int,
+        index: str,
+        *,
+        normalizer: Callable[[Mapping[str, Any]], dict[str, Any]],
+        source: list[str],
+        sort: list[Mapping[str, Any] | str] | None = None,
+    ) -> ToolResult:
         try:
             self.last_query = {"index": index, "query": query, "size": size}
-            response = self.elastic.search(index=index, query=query, size=size)
+            response = self.elastic.search(
+                index=index,
+                query=query,
+                size=size,
+                source=source,
+                sort=sort,
+            )
             hits = response.get("hits", {})
+            total = _total_value(hits.get("total", 0))
+            events = [
+                normalizer(hit)
+                for hit in hits.get("hits", [])
+                if isinstance(hit, Mapping) and isinstance(hit.get("_source", {}), Mapping)
+            ]
             return ToolResult(
                 tool_name=name,
                 ok=True,
                 data={
-                    "total": hits.get("total", 0),
-                    "events": [hit.get("_source", {}) for hit in hits.get("hits", [])],
+                    "total_events": total,
+                    "returned_events": len(events),
+                    "sampled": total > len(events),
+                    "sampling": {
+                        "ordered_by": ["@timestamp", "_id"],
+                        "limit": size,
+                        "note": "Returned events are a deterministic bounded sample, not all matches."
+                    },
+                    "omitted_fields": [
+                        "agent.*",
+                        "ecs.*",
+                        "input.*",
+                        "log.*",
+                        "observer.*",
+                        "os.*",
+                        "unmapped source fields",
+                    ],
+                    "events": events,
                 },
             )
         except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
@@ -78,6 +202,9 @@ class InvestigationTools:
             return self._execute(
                 "get_source_activity", args, query, min(args.max_events, self.settings.max_query_results),
                 self.settings.elastic_telemetry_indices,
+                normalizer=lambda hit: compact_event(hit.get("_source", {})),
+                source=_EVENT_SOURCE_FIELDS,
+                sort=[{"@timestamp": "asc"}, {"_id": "asc"}],
             )
         except ValueError as exc:
             return ToolResult(tool_name="get_source_activity", ok=False, error=str(exc))
@@ -90,8 +217,8 @@ class InvestigationTools:
             aggregations = {
                 "unique_paths": {"cardinality": {"field": "url.original", "precision_threshold": 1000}},
                 "status_codes": {"terms": {"field": "http.response.status_code", "size": 20}},
-                "common_paths": {"terms": {"field": "url.original", "size": 20}},
-                "user_agents": {"terms": {"field": "user_agent.original", "size": 20}},
+                "common_paths": {"terms": {"field": "url.original", "size": 10}},
+                "user_agents": {"terms": {"field": "user_agent.original", "size": 10}},
                 "requests_over_time": {
                     "date_histogram": {"field": "@timestamp", "fixed_interval": "1m", "min_doc_count": 0}
                 },
@@ -106,10 +233,7 @@ class InvestigationTools:
             return ToolResult(
                 tool_name="get_http_statistics",
                 ok=True,
-                data={
-                    "total_requests": _total_value(response.get("hits", {}).get("total", 0)),
-                    "statistics": response.get("aggregations", {}),
-                },
+                data=_compact_http_statistics(response),
             )
         except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
             return ToolResult(tool_name="get_http_statistics", ok=False, error=str(exc))
@@ -125,6 +249,11 @@ class InvestigationTools:
             query = {"bool": {"filter": [_time_query(start, end)], "should": identities, "minimum_should_match": 1}}
             return self._execute(
                 "get_related_alerts", args, query, self.settings.max_query_results, self.settings.elastic_alert_index,
+                normalizer=lambda hit: compact_alert(
+                    str(hit.get("_id", "")), hit.get("_source", {})
+                ),
+                source=_ALERT_SOURCE_FIELDS,
+                sort=[{"@timestamp": "asc"}, {"_id": "asc"}],
             )
         except ValueError as exc:
             return ToolResult(tool_name="get_related_alerts", ok=False, error=str(exc))

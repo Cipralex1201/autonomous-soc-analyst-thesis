@@ -44,13 +44,25 @@ bounded detection evidence. It does not send the original alert document,
 Elastic rule documentation, or full detection queries.
 The model may request `get_source_activity`, `get_http_statistics`, or
 `get_related_alerts`; Python validates each request, executes a bounded query,
-and sends the bounded result back in a follow-up Responses API call. Arbitrary
-Elasticsearch DSL and shell execution are not available.
+and sends the bounded result back in a follow-up Responses API call using the
+Responses conversation state and matching function-call IDs. Query windows are
+limited by `MAX_QUERY_WINDOW_MINUTES`; rejected arguments are returned to the
+model so it can retry within that limit. Arbitrary Elasticsearch DSL and shell
+execution are not available.
+
+SIEM tool results are normalized before they reach the model. Telemetry uses
+common ECS fields plus bounded detection-specific evidence; HTTP statistics
+contain counts, top paths, status/user-agent distributions, and time buckets;
+related alerts contain identifiers, rule names, timestamps, severities, and
+key evidence only. Retrieval uses source filtering and deterministic limits,
+and each result declares sampled or omitted information. Full Elasticsearch
+documents remain unchanged in Elasticsearch.
 
 The final model assessment is validated with Pydantic and application code
 derives `ESCALATE` or `CLOSE`. Failures and exhausted budgets safely become
-`uncertain`/`ESCALATE`. The configured request and tool budgets prevent
-unbounded API usage.
+`uncertain`/`ESCALATE` with `execution_status=failed`; only a parsed final
+assessment is marked `execution_status=completed`. The configured request and
+tool budgets prevent unbounded API usage.
 
 The `check` command performs a zero-result `match_all` search against
 `ELASTIC_ALERT_INDEX`, so the API key only needs read access to that index; it
