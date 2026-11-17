@@ -51,7 +51,11 @@ class ElasticClient:
 
     def get_alert(self, alert_id: str) -> AlertContext:
         response = self.client.get(index=self.settings.elastic_alert_index, id=alert_id)
-        return self.normalize_alert(response.get("_id", alert_id), response.get("_source", {}))
+        return self.normalize_alert(
+            response.get("_id", alert_id),
+            response.get("_source", {}),
+            response.get("_index"),
+        )
 
     def search_alerts(self, *, query: Mapping[str, Any], size: int = 100) -> list[AlertContext]:
         response = self.client.search(
@@ -61,16 +65,32 @@ class ElasticClient:
             size=min(size, 1000),
         )
         return [
-            self.normalize_alert(hit.get("_id", ""), hit.get("_source", {}))
+            self.normalize_alert(hit.get("_id", ""), hit.get("_source", {}), hit.get("_index"))
             for hit in response.get("hits", {}).get("hits", [])
         ]
 
     @staticmethod
-    def normalize_alert(alert_id: str, source: Mapping[str, Any]) -> AlertContext:
+    def normalize_alert(
+        alert_id: str,
+        source: Mapping[str, Any],
+        originating_index: str | None = None,
+    ) -> AlertContext:
         """Normalize optional Elastic alert fields without assuming an HTTP schema."""
         event_ids = source.get("event", {}).get("id", []) if isinstance(source.get("event"), Mapping) else []
         if isinstance(event_ids, str):
             event_ids = [event_ids]
+        datasets = sorted({
+            str(value)
+            for value in (
+                field(source, "event", "dataset"),
+                field(source, "data_stream", "dataset"),
+            )
+            if isinstance(value, str) and value.strip()
+        })
+        indices = [originating_index] if isinstance(originating_index, str) and originating_index else []
+        provenance = "known" if datasets or indices else "missing"
+        if len(datasets) > 1 or len(indices) > 1:
+            provenance = "ambiguous"
         return AlertContext(
             alert_id=alert_id,
             rule_name=field(source, "kibana", "alert", "rule", "name")
@@ -85,6 +105,9 @@ class ElasticClient:
             user_name=field(source, "user", "name"),
             event_ids=list(event_ids),
             detection_evidence=compact_detection_evidence(source),
+            telemetry_datasets=datasets,
+            originating_indices=indices,
+            telemetry_provenance=provenance,
             metadata={
                 "event_kind": field(source, "event", "kind"),
             },

@@ -14,6 +14,36 @@ def test_alert_normalization_keeps_optional_http_fields_optional() -> None:
     assert alert.source_ip == "192.0.2.10"
 
 
+def test_alert_normalization_extracts_dataset_and_originating_index() -> None:
+    alert = ElasticClient.normalize_alert(
+        "alert-1",
+        {
+            "event": {"dataset": "endpoint.events"},
+            "data_stream": {"dataset": "endpoint.events"},
+        },
+        "logs-endpoint.events-2026.11.17",
+    )
+
+    assert alert.telemetry_datasets == ["endpoint.events"]
+    assert alert.originating_indices == ["logs-endpoint.events-2026.11.17"]
+    assert alert.telemetry_provenance == "known"
+
+
+def test_alert_normalization_marks_conflicting_dataset_provenance_ambiguous() -> None:
+    alert = ElasticClient.normalize_alert(
+        "alert-1",
+        {"event.dataset": "http", "data_stream.dataset": "nginx.access"},
+    )
+
+    assert alert.telemetry_datasets == ["http", "nginx.access"]
+    assert alert.telemetry_provenance == "ambiguous"
+
+
+def test_alert_normalization_marks_missing_provenance() -> None:
+    alert = ElasticClient.normalize_alert("alert-1", {})
+
+    assert alert.telemetry_provenance == "missing"
+
 def test_search_rejects_unconfigured_index() -> None:
     client = ElasticClient(Settings(), client=Mock())
     try:

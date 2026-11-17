@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from fnmatch import fnmatchcase
 from datetime import datetime, timezone
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -112,6 +113,7 @@ _BLOCKED_SOURCE_PREFIXES = (
     "observer.",
     "os.",
 )
+_INTERNAL_FIELD_PREFIXES = ("_",)
 
 
 def _configured_index(settings: Settings, index: str) -> bool:
@@ -400,11 +402,34 @@ def _compact_http_statistics(response: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bound_discovery_result(result: dict[str, Any], max_bytes: int) -> dict[str, Any]:
+    """Keep field discovery bounded while preserving accurate omission counts."""
+    rows = result["rows"]
+    while rows and len(json.dumps(result, separators=(",", ":"))) > max_bytes:
+        rows.pop()
+        result["returned_fields"] = len({row[0] for row in rows})
+        result["omitted_field_count"] = result["total_fields"] - result["returned_fields"]
+        result["truncated"] = True
+        if rows:
+            result["next_after_field"] = rows[-1][0]
+        else:
+            result.pop("next_after_field", None)
+    if len(json.dumps(result, separators=(",", ":"))) > max_bytes:
+        result["columns"] = []
+        result["rows"] = []
+        result["returned_fields"] = 0
+        result["omitted_field_count"] = result["total_fields"]
+        result["truncated"] = True
+        result.pop("next_after_field", None)
+    return result
+
+
 class InvestigationTools:
     def __init__(self, elastic: ElasticClient, settings: Settings) -> None:
         self.elastic = elastic
         self.settings = settings
         self.last_query: dict[str, Any] | None = None
+        self._field_caps_cache: dict[str, dict[str, Any]] = {}
 
     def search_elasticsearch(self, args: ElasticsearchSearchArgs) -> ToolResult:
         try:
@@ -444,43 +469,67 @@ class InvestigationTools:
         try:
             if not _configured_index(self.settings, args.index):
                 raise ValueError(index_authorization_error(self.settings, args.index))
-            if args.field_prefix and len(args.field_prefix) > 200:
-                raise ValueError("field_prefix exceeds safety limits")
-            pattern = f"{args.field_prefix}*" if args.field_prefix else "*"
-            response = self.elastic.field_caps(
-                index=args.index,
-                fields=[pattern],
-                request_timeout=self.settings.elastic_search_timeout_seconds,
-            )
-            raw_fields = response.get("fields", {})
+            for value, name in (
+                (args.field_prefix, "field_prefix"),
+                (args.field_pattern, "field_pattern"),
+                (args.after_field, "after_field"),
+            ):
+                if value is not None and (not value.strip() or len(value) > 200):
+                    raise ValueError(f"{name} is invalid")
+            if args.field_prefix and args.field_pattern:
+                raise ValueError("field_prefix and field_pattern are mutually exclusive")
+            if args.index not in self._field_caps_cache:
+                response = self.elastic.field_caps(
+                    index=args.index,
+                    fields=["*"],
+                    request_timeout=self.settings.elastic_search_timeout_seconds,
+                )
+                self._field_caps_cache[args.index] = dict(response)
+            raw_fields = self._field_caps_cache[args.index].get("fields", {})
             if not isinstance(raw_fields, Mapping):
                 raise ValueError("Elasticsearch returned invalid field capabilities")
+            pattern = args.field_pattern or (
+                f"{args.field_prefix}*" if args.field_prefix else None
+            )
             names = sorted(
                 name for name in raw_fields
-                if not args.field_prefix or name.startswith(args.field_prefix)
+                if (pattern is None or fnmatchcase(name, pattern))
+                and (
+                    not name.startswith(_INTERNAL_FIELD_PREFIXES)
+                    or (pattern is not None and pattern.startswith("_"))
+                )
             )
+            if args.after_field:
+                names = [name for name in names if name > args.after_field]
+            total_fields = len(names)
             fields = []
+            columns = ["field", "type", "searchable", "aggregatable"]
             for name in names[:args.max_fields]:
                 definitions = raw_fields.get(name, {})
-                types = []
                 if isinstance(definitions, Mapping):
                     for type_name, metadata in sorted(definitions.items()):
-                        entry = {"type": type_name}
+                        searchable = False
+                        aggregatable = False
                         if isinstance(metadata, Mapping):
-                            entry["searchable"] = bool(metadata.get("searchable", False))
-                            entry["aggregatable"] = bool(metadata.get("aggregatable", False))
-                        types.append(entry)
-                fields.append({"field": name, "types": types})
+                            searchable = bool(metadata.get("searchable", False))
+                            aggregatable = bool(metadata.get("aggregatable", False))
+                        fields.append([name, type_name, searchable, aggregatable])
+            returned_fields = len({row[0] for row in fields})
+            data: dict[str, Any] = {
+                "columns": columns,
+                "rows": fields,
+                "total_fields": total_fields,
+                "returned_fields": returned_fields,
+                "omitted_field_count": max(0, total_fields - returned_fields),
+                "truncated": total_fields > returned_fields,
+                "field_pattern": pattern or "*",
+            }
+            if returned_fields:
+                data["next_after_field"] = fields[-1][0]
+            data = _bound_discovery_result(data, self.settings.max_tool_result_bytes)
             return ToolResult(
                 tool_name="discover_fields",
-                ok=True,
-                data={
-                    "field_count": len(names),
-                    "returned_fields": len(fields),
-                    "truncated": len(names) > len(fields),
-                    "fields": fields,
-                    "omitted_field_count": max(0, len(names) - len(fields)),
-                },
+                ok=True, data=data,
             )
         except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
             return ToolResult(tool_name="discover_fields", ok=False, error=str(exc))

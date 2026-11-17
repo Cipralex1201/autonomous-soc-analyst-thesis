@@ -39,9 +39,13 @@ values, cookies, passwords, tokens, and secrets.
 
 `investigate` only retrieves and normalizes an alert, so it does not spend
 OpenAI credits. `triage` sends a compact alert context to the configured
-model: alert identity, rule details, timestamp, severity, source IP, and
-bounded detection evidence. It does not send the original alert document,
-Elastic rule documentation, or full detection queries.
+model: alert identity, rule details, timestamp, severity, source IP, bounded
+detection evidence, and normalized telemetry provenance when available
+(`event.dataset`, `data_stream.dataset`, and originating alert index). It does
+not send the original alert document, Elastic rule documentation, or full
+detection queries. The model is instructed to start with known originating
+telemetry while retaining the ability to select other authorized datasets for
+correlation.
 The model may request only `discover_fields` and `search_elasticsearch`;
 Python validates each request, executes a bounded query, and sends the bounded
 result back in a follow-up Responses API call using the Responses conversation
@@ -50,7 +54,12 @@ execution are not available; generic Query DSL is accepted only through the
 validated read-only search tool.
 
 For general investigations the model can use `discover_fields` followed by
-`search_elasticsearch`. The latter accepts read-only Query DSL, selected
+`search_elasticsearch`. Field discovery accepts prefixes or wildcard patterns,
+excludes internal metadata fields by default, preserves conflicting mappings as
+separate compact table rows, supports continuation with `after_field`, and
+caches field capabilities for the investigation. Field count and serialized
+byte limits are enforced, with total, returned, omitted, and continuation
+metadata reported accurately. The latter accepts read-only Query DSL, selected
 source fields, sorting, and aggregations; Python validates allowed indices,
 rejects unsafe/resource-intensive features, applies the Elasticsearch timeout,
 and bounds the serialized result with `MAX_TOOL_RESULT_BYTES`.

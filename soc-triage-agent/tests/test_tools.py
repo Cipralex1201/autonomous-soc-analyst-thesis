@@ -387,11 +387,92 @@ def test_field_discovery_is_bounded_and_reports_truncation() -> None:
         DiscoverFieldsArgs(index="logs-*", max_fields=2)
     )
 
-    assert result.data["field_count"] == 5
+    assert result.data["total_fields"] == 5
     assert result.data["returned_fields"] == 2
     assert result.data["truncated"] is True
+    assert result.data["columns"] == ["field", "type", "searchable", "aggregatable"]
+    assert result.data["rows"] == [
+        ["custom.field.0", "keyword", True, True],
+        ["custom.field.1", "keyword", True, True],
+    ]
     assert elastic.field_caps.call_args.kwargs["fields"] == ["*"]
     assert elastic.field_caps.call_args.kwargs["request_timeout"] == 10
+
+
+def test_field_discovery_preserves_conflicting_types_and_supports_custom_patterns() -> None:
+    elastic = Mock()
+    elastic.field_caps.return_value = {
+        "fields": {
+            "@timestamp": {"date": {"searchable": True, "aggregatable": True}},
+            "custom.value": {
+                "keyword": {"searchable": True, "aggregatable": True},
+                "long": {"searchable": True, "aggregatable": False},
+            },
+            "_ignored": {"keyword": {"searchable": True, "aggregatable": False}},
+        }
+    }
+    tools = InvestigationTools(elastic, Settings())
+
+    result = tools.discover_fields(
+        DiscoverFieldsArgs(index="logs-*", field_pattern="custom.*")
+    )
+
+    assert result.data["rows"] == [
+        ["custom.value", "keyword", True, True],
+        ["custom.value", "long", True, False],
+    ]
+    assert tools.discover_fields(
+        DiscoverFieldsArgs(index="logs-*", field_pattern="_*")
+    ).data["rows"][0][0] == "_ignored"
+
+
+def test_field_discovery_caches_overlapping_requests_and_supports_continuation() -> None:
+    elastic = Mock()
+    elastic.field_caps.return_value = {
+        "fields": {
+            "http.request.method": {"keyword": {"searchable": True, "aggregatable": True}},
+            "http.response.status_code": {"long": {"searchable": True, "aggregatable": True}},
+            "process.name": {"keyword": {"searchable": True, "aggregatable": True}},
+        }
+    }
+    tools = InvestigationTools(elastic, Settings())
+
+    first = tools.discover_fields(
+        DiscoverFieldsArgs(index="logs-*", field_prefix="http.", max_fields=1)
+    )
+    second = tools.discover_fields(
+        DiscoverFieldsArgs(
+            index="logs-*",
+            field_prefix="http.",
+            after_field=first.data["next_after_field"],
+        )
+    )
+
+    assert first.data["returned_fields"] == 1
+    assert second.data["rows"] == [
+        ["http.response.status_code", "long", True, True]
+    ]
+    elastic.field_caps.assert_called_once()
+
+
+def test_field_discovery_reports_byte_truncation() -> None:
+    elastic = Mock()
+    elastic.field_caps.return_value = {
+        "fields": {
+            f"custom.{index:03d}." + ("x" * 60): {
+                "keyword": {"searchable": True, "aggregatable": True}
+            }
+            for index in range(20)
+        }
+    }
+    result = InvestigationTools(elastic, Settings(max_tool_result_bytes=1001)).discover_fields(
+        DiscoverFieldsArgs(index="logs-*", max_fields=20)
+    )
+
+    import json
+    assert result.data["truncated"] is True
+    assert result.data["omitted_field_count"] > 0
+    assert len(json.dumps(result.data, separators=(",", ":"))) <= 1001
 
 
 def test_field_discovery_allows_configured_patterns_and_matching_concrete_indices() -> None:

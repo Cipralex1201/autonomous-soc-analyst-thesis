@@ -55,6 +55,9 @@ class AlertContext(BaseModel):
     user_name: str | None = None
     event_ids: list[str] = Field(default_factory=list)
     detection_evidence: dict[str, Any] = Field(default_factory=dict)
+    telemetry_datasets: list[str] = Field(default_factory=list)
+    originating_indices: list[str] = Field(default_factory=list)
+    telemetry_provenance: Literal["known", "ambiguous", "missing"] = "missing"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -109,6 +112,8 @@ class ElasticsearchSearchArgs(BaseModel):
 class DiscoverFieldsArgs(BaseModel):
     index: str
     field_prefix: str | None = None
+    field_pattern: str | None = None
+    after_field: str | None = None
     max_fields: int = Field(default=100, gt=0, le=500)
 
 

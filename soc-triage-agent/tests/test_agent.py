@@ -224,6 +224,41 @@ def test_follow_up_openai_payload_contains_compact_tool_evidence() -> None:
     assert "unrequested source fields" in tool_output
 
 
+def test_follow_up_openai_payload_contains_compact_field_discovery() -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("discover_fields", {
+            "index": "logs-*",
+            "field_prefix": "process.",
+            "max_fields": 2,
+        })], response_id="response-1"),
+        response([], json.dumps({
+            "assessment": "uncertain",
+            "severity": "low",
+            "confidence": 0,
+            "summary": "Insufficient evidence.",
+            "evidence": [],
+            "missing_evidence": [],
+            "recommended_next_steps": [],
+        })),
+    ]
+    elastic = Mock()
+    elastic.field_caps.return_value = {
+        "fields": {
+            "process.name": {"keyword": {"searchable": True, "aggregatable": True}},
+            "process.pid": {"long": {"searchable": True, "aggregatable": True}},
+        }
+    }
+
+    report = TriageAgent(settings(), InvestigationTools(elastic, settings()), openai).run(alert())
+
+    assert report.execution_status == "completed"
+    output = openai.responses.create.call_args_list[1].kwargs["input"][0]["output"]
+    assert '"columns":["field","type","searchable","aggregatable"]' in output
+    assert '"rows":[["process.name","keyword",true,true],["process.pid","long",true,true]]' in output
+    assert '"types"' not in output
+
+
 def test_initial_context_limits_rule_description() -> None:
     context = alert_input(
         AlertContext(
@@ -235,6 +270,22 @@ def test_initial_context_limits_rule_description() -> None:
 
     assert "[description omitted]" in context
     assert context.count("rule detail") == 100
+
+
+def test_initial_context_includes_compact_alert_telemetry_provenance() -> None:
+    context = alert_input(
+        AlertContext(
+            alert_id="alert-1",
+            telemetry_datasets=["endpoint.events"],
+            originating_indices=["logs-endpoint.events-*"],
+            telemetry_provenance="known",
+        ),
+        max_query_window_minutes=30,
+    )
+
+    assert '"telemetry_datasets": [' in context and "endpoint.events" in context
+    assert '"originating_indices": [' in context and "logs-endpoint.events-*" in context
+    assert "Use known originating datasets first" in context
 
 
 def test_sensitive_values_are_redacted() -> None:
