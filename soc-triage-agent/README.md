@@ -106,3 +106,69 @@ Run tests with:
 ```bash
 .venv/bin/python -m pytest -q
 ```
+
+## Structured investigation tracing
+
+Set `INVESTIGATION_TRACING_ENABLED=true` to write one JSONL record per line to
+`logs/investigations/<investigation_id>.jsonl` (or
+`INVESTIGATION_TRACE_DIRECTORY`). Tracing is independent of console logging and
+prompt-inspection mode. Every rerun gets a new UUID, while the alert ID remains
+the correlation key.
+
+Each JSONL file contains chronological `investigation.started`, `llm.request`,
+`llm.response`, `tool.called`, `tool.completed` or `tool.failed`, and final
+investigation events. Requests include exact Responses API parameters,
+including `previous_response_id`; responses include SDK output and reported
+usage. Tool completions include validated arguments and the actual bounded
+Elasticsearch DSL. API keys and authorization values are never included in
+trace configuration.
+
+Elasticsearch persistence uses `soc-triage-traces-v1` for events and
+`soc-triage-results-v1` for one final document per investigation. The writer
+uses an explicit `ELASTIC_WRITER_API_KEY` when configured; otherwise it falls
+back to `ELASTIC_API_KEY`. Trace document IDs are
+`<investigation_id>:<sequence>` and result IDs are `<investigation_id>`, making
+retries idempotent. Elasticsearch failures are logged but do not invalidate or
+erase the local JSONL archive.
+
+Create a writer API key with these privileges:
+
+* `manage_index_templates` or the narrower index create privileges for
+  `soc-triage-traces-v1` and `soc-triage-results-v1`
+* `create_index`, `create_doc`, and `index` or `all` on those two indices
+* no read or write access to alert or telemetry indices is needed beyond the
+  existing read credential
+
+In Kibana Stack Management, create data views named
+`SOC triage traces` for `soc-triage-traces-v1` and `SOC triage results` for
+`soc-triage-results-v1`, using `@timestamp` as the time field. Restrict the
+data-view role to these indices and use Discover.
+
+```esql
+FROM soc-triage-traces-v1
+| WHERE investigation_id == "<INVESTIGATION_ID>"
+| SORT sequence ASC
+| KEEP @timestamp, sequence, event_type, call_id, response_id, tool, status, duration_seconds
+```
+
+```esql
+FROM soc-triage-traces-v1
+| WHERE alert_id == "<ALERT_ID>"
+| SORT investigation_id ASC, sequence ASC
+| KEEP investigation_id, sequence, @timestamp, event_type, model_request_number
+```
+
+```esql
+FROM soc-triage-traces-v1
+| WHERE event_type == "tool.failed"
+| KEEP @timestamp, investigation_id, alert_id, call_id, tool.name, error
+| SORT @timestamp DESC
+```
+
+```esql
+FROM soc-triage-results-v1
+| WHERE experiment_id == "<EXPERIMENT_ID>"
+| KEEP investigation_id, alert_id, assessment, severity, confidence, model_request_count,
+    tool_call_count, processing_duration_seconds, token_usage
+| SORT processing_duration_seconds ASC
+```

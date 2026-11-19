@@ -507,6 +507,12 @@ class InvestigationTools:
                     raise ValueError(f"{name} is invalid")
             if args.field_prefix and args.field_pattern:
                 raise ValueError("field_prefix and field_pattern are mutually exclusive")
+            self.last_query = {
+                "operation": "field_caps",
+                "index": args.index,
+                "fields": ["*"],
+                "request_timeout_seconds": self.settings.elastic_search_timeout_seconds,
+            }
             if args.index not in self._field_caps_cache:
                 response = self.elastic.field_caps(
                     index=args.index,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from elasticsearch import Elasticsearch
@@ -20,6 +21,106 @@ class ElasticClient:
     def __init__(self, settings: Settings, client: Elasticsearch | None = None) -> None:
         self.settings = settings
         self.client = client or self._build_client(settings)
+        self.writer_client = self._build_writer_client(settings)
+
+    @staticmethod
+    def _build_writer_client(settings: Settings) -> Elasticsearch | None:
+        api_key = settings.elastic_writer_api_key
+        if not api_key:
+            return None
+        kwargs: dict[str, Any] = {"hosts": [settings.elastic_url], "api_key": api_key}
+        if settings.elastic_ca_cert:
+            kwargs["ca_certs"] = settings.elastic_ca_cert
+        return Elasticsearch(**kwargs)
+
+    def _trace_writer(self) -> Elasticsearch:
+        return self.writer_client or self.client
+
+    def ensure_trace_mappings(self) -> None:
+        """Create the two trace mappings when explicit writer privileges permit it."""
+        trace_mapping = {
+            "mappings": {
+                "dynamic": False,
+                "properties": {
+                    "investigation_id": {"type": "keyword"},
+                    "alert_id": {"type": "keyword"},
+                    "@timestamp": {"type": "date"},
+                    "sequence": {"type": "integer"},
+                    "event_type": {"type": "keyword"},
+                    "schema_version": {"type": "keyword"},
+                    "experiment_id": {"type": "keyword"},
+                    "run_number": {"type": "integer"},
+                    "agent_mode": {"type": "keyword"},
+                    "call_id": {"type": "keyword"},
+                    "response_id": {"type": "keyword"},
+                    "model_request_number": {"type": "integer"},
+                    "tool": {"type": "object", "enabled": False},
+                    "llm": {"type": "object", "enabled": False},
+                    "metrics": {"type": "object", "enabled": False},
+                    "status": {"type": "keyword"},
+                    "duration_seconds": {"type": "double"},
+                },
+            }
+        }
+        result_mapping = {
+            "mappings": {
+                "dynamic": False,
+                "properties": {
+                    "investigation_id": {"type": "keyword"},
+                    "alert_id": {"type": "keyword"},
+                    "@timestamp": {"type": "date"},
+                    "execution_status": {"type": "keyword"},
+                    "assessment": {"type": "keyword"},
+                    "proposed_action": {"type": "keyword"},
+                    "severity": {"type": "keyword"},
+                    "confidence": {"type": "double"},
+                    "provisional": {"type": "boolean"},
+                    "model": {"type": "keyword"},
+                    "experiment_id": {"type": "keyword"},
+                    "run_number": {"type": "integer"},
+                    "agent_mode": {"type": "keyword"},
+                    "tool_call_count": {"type": "integer"},
+                    "successful_tool_call_count": {"type": "integer"},
+                    "failed_tool_call_count": {"type": "integer"},
+                    "model_request_count": {"type": "integer"},
+                    "processing_duration_seconds": {"type": "double"},
+                    "token_usage": {"type": "object", "enabled": False},
+                    "configuration": {"type": "object", "enabled": False},
+                    "summary": {"type": "text"},
+                    "evidence": {"type": "text"},
+                    "missing_evidence": {"type": "text"},
+                    "recommended_next_steps": {"type": "text"},
+                    "error": {"type": "text"},
+                },
+            }
+        }
+        writer = self._trace_writer()
+        writer.indices.create(index=self.settings.elastic_triage_traces_index, body=trace_mapping, ignore=400)
+        writer.indices.create(index=self.settings.elastic_triage_results_index, body=result_mapping, ignore=400)
+
+    def index_trace_event(self, index: str, investigation_id: str, sequence: int, event: Mapping[str, Any]) -> Any:
+        document = dict(event)
+        document.setdefault("@timestamp", datetime.now(timezone.utc).isoformat())
+        if "tool" not in document:
+            document["tool"] = {}
+        if "llm" not in document:
+            document["llm"] = {}
+        if "metrics" not in document:
+            document["metrics"] = {}
+        return self._trace_writer().index(
+            index=index,
+            id=f"{investigation_id}:{sequence}",
+            document=document,
+            refresh="wait_for",
+        )
+
+    def index_investigation_result(self, index: str, investigation_id: str, document: Mapping[str, Any]) -> Any:
+        return self._trace_writer().index(
+            index=index,
+            id=investigation_id,
+            document=dict(document),
+            refresh="wait_for",
+        )
 
     @staticmethod
     def _build_client(settings: Settings) -> Elasticsearch:

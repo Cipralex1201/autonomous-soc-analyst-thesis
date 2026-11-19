@@ -162,6 +162,11 @@ class TriageReport(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     token_usage: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
+    model: str | None = None
+    experiment_id: str | None = None
+    run_number: int | None = None
+    agent_mode: str | None = None
+    configuration: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def enforce_action_mapping(self) -> "TriageReport":

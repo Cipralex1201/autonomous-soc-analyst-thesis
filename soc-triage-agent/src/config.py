@@ -37,6 +37,15 @@ class Settings(BaseModel):
     log_triage_results: bool = False
     max_tool_calls: int = Field(default=5, gt=0, le=100)
     max_model_requests: int = Field(default=8, gt=0, le=100)
+    investigation_tracing_enabled: bool = True
+    investigation_trace_directory: str = "logs/investigations"
+    investigation_trace_elastic_enabled: bool = True
+    elastic_triage_results_index: str = "soc-triage-results-v1"
+    elastic_triage_traces_index: str = "soc-triage-traces-v1"
+    elastic_writer_api_key: str | None = None
+    experiment_id: str | None = None
+    run_number: int | None = None
+    agent_mode: str = "triage"
 
     @field_validator("elastic_url")
     @classmethod
@@ -98,6 +107,15 @@ class Settings(BaseModel):
             "LOG_TRIAGE_RESULTS": "log_triage_results",
             "MAX_TOOL_CALLS": "max_tool_calls",
             "MAX_MODEL_REQUESTS": "max_model_requests",
+            "INVESTIGATION_TRACING_ENABLED": "investigation_tracing_enabled",
+            "INVESTIGATION_TRACE_DIRECTORY": "investigation_trace_directory",
+            "INVESTIGATION_TRACE_ELASTIC_ENABLED": "investigation_trace_elastic_enabled",
+            "ELASTIC_TRIAGE_RESULTS_INDEX": "elastic_triage_results_index",
+            "ELASTIC_TRIAGE_TRACES_INDEX": "elastic_triage_traces_index",
+            "ELASTIC_WRITER_API_KEY": "elastic_writer_api_key",
+            "EXPERIMENT_ID": "experiment_id",
+            "RUN_NUMBER": "run_number",
+            "AGENT_MODE": "agent_mode",
         }
         for environment_name, field_name in mapping.items():
             value = os.getenv(environment_name)
