@@ -74,10 +74,12 @@ result declares sampled or omitted information. Full Elasticsearch documents
 remain unchanged in Elasticsearch.
 
 The final model assessment is validated with Pydantic and application code
-derives `ESCALATE` or `CLOSE`. Failures and exhausted budgets safely become
-`uncertain`/`ESCALATE` with `execution_status=failed`; only a parsed final
-assessment is marked `execution_status=completed`. The configured request and
-tool budgets prevent unbounded API usage.
+derives `ESCALATE` or `CLOSE`. The final configured model request is reserved
+for a no-tools assessment when investigation reaches a budget, producing a
+provisional `execution_status=partial` report with collected tool results and
+human-review guidance. Normal validated assessments are `completed`; technical
+failures are `failed` while preserving any collected evidence and errors.
+Configured request and tool budgets prevent unbounded API usage.
 
 The `check` command performs a zero-result `match_all` search against
 `ELASTIC_ALERT_INDEX`, so the API key only needs read access to that index; it

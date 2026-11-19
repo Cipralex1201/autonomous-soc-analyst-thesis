@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from .config import Settings, configured_index_patterns
 from .observability import inspect_request, sanitize
-from .prompts import alert_input, load_system_prompt
+from .prompts import alert_input, finalization_input, load_system_prompt
 from .schemas import (
     AlertContext,
     DiscoverFieldsArgs,
@@ -58,8 +58,12 @@ class TriageAgent:
         started = time.monotonic()
         requests = 0
         tool_calls = 0
+        successful_tool_calls = 0
+        failed_tool_calls = 0
+        tool_results: list[ToolResult] = []
+        token_usage: dict[str, int] = {}
+        finalization_reason: str | None = None
         try:
-            response = None
             input_items: Any = alert_input(
                 alert,
                 self.settings.max_query_window_minutes,
@@ -67,9 +71,20 @@ class TriageAgent:
             )
             previous_response_id: str | None = None
             while requests < self.settings.max_model_requests:
+                # The last configured request is reserved for a no-tools assessment.
+                if requests == self.settings.max_model_requests - 1:
+                    finalization_reason = "model-request budget nearly exhausted"
+                    break
                 payload: dict[str, Any] = {
                     "model": self.settings.openai_model,
-                    "instructions": self.prompt,
+                    "instructions": (
+                        f"{self.prompt}\n\nInvestigation budget: "
+                        f"{self.settings.max_model_requests - requests - 1} model requests "
+                        f"remain for investigation after this request and "
+                        f"{self.settings.max_tool_calls - tool_calls} SIEM tool calls remain. "
+                        "Prioritize unresolved questions, avoid redundant queries, and "
+                        "finalize early when the evidence is sufficient."
+                    ),
                     "input": input_items,
                     "tools": tool_definitions(),
                     "text": {
@@ -89,6 +104,7 @@ class TriageAgent:
                     inspect_request(payload, self.settings.prompt_inspection_mode, self.logger)
                 requests += 1
                 response = self.client.responses.create(**payload)
+                self._record_usage(response, token_usage)
                 output = list(_value(response, "output", []) or [])
                 if self.settings.log_llm_responses:
                     self.logger.info(
@@ -99,13 +115,23 @@ class TriageAgent:
                 calls = [item for item in output if _value(item, "type") == "function_call"]
                 if not calls:
                     assessment = self._parse_assessment(response)
-                    return self._report(alert, investigation_id, assessment, requests, tool_calls, started)
+                    return self._report(
+                        alert, investigation_id, assessment, requests, tool_calls,
+                        successful_tool_calls, failed_tool_calls, tool_results,
+                        token_usage, started,
+                    )
                 if tool_calls + len(calls) > self.settings.max_tool_calls:
-                    raise InvestigationError("maximum SIEM tool-call budget exhausted")
+                    finalization_reason = "SIEM tool-call budget exhausted"
+                    break
                 follow_up: list[Any] = []
                 for call in calls:
                     result = self._execute_call(call, investigation_id)
                     tool_calls += 1
+                    tool_results.append(result)
+                    if result.ok:
+                        successful_tool_calls += 1
+                    else:
+                        failed_tool_calls += 1
                     follow_up.append(
                         {
                             "type": "function_call_output",
@@ -119,11 +145,68 @@ class TriageAgent:
                     if previous_response_id is not None
                     else [self._function_call_input(call) for call in calls] + follow_up
                 )
-            raise InvestigationError("maximum model-request budget exhausted")
+            if finalization_reason is None:
+                finalization_reason = "investigation budget exhausted"
+            if requests >= self.settings.max_model_requests:
+                raise InvestigationError("no model request remained for finalization")
+
+            self.logger.info(
+                "Finalizing investigation_id=%s reason=%s model_requests=%d tool_calls=%d "
+                "successful_tool_calls=%d failed_tool_calls=%d",
+                investigation_id,
+                finalization_reason,
+                requests,
+                tool_calls,
+                successful_tool_calls,
+                failed_tool_calls,
+            )
+            final_payload: dict[str, Any] = {
+                "model": self.settings.openai_model,
+                "instructions": self.prompt,
+                "input": finalization_input(
+                    reason=finalization_reason,
+                    collected_results=[result.model_dump() for result in tool_results],
+                    remaining_model_requests=self.settings.max_model_requests - requests,
+                    remaining_tool_calls=self.settings.max_tool_calls - tool_calls,
+                ),
+                "tools": [],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "triage_assessment",
+                        "schema": strict_json_schema(TriageAssessment),
+                        "strict": True,
+                    }
+                },
+            }
+            if previous_response_id is not None:
+                final_payload["previous_response_id"] = previous_response_id
+            else:
+                final_payload["input"] = (
+                    input_items + [final_payload["input"]]
+                    if isinstance(input_items, list)
+                    else [input_items, final_payload["input"]]
+                )
+            if self.settings.prompt_inspection_mode == "pause" or (
+                self.settings.prompt_inspection_mode == "log" and self.settings.log_llm_requests
+            ):
+                inspect_request(final_payload, self.settings.prompt_inspection_mode, self.logger)
+            requests += 1
+            final_response = self.client.responses.create(**final_payload)
+            self._record_usage(final_response, token_usage)
+            assessment = self._parse_assessment(final_response)
+            return self._report(
+                alert, investigation_id, assessment, requests, tool_calls,
+                successful_tool_calls, failed_tool_calls, tool_results,
+                token_usage, started, execution_status="partial",
+                finalization_reason=finalization_reason,
+            )
         except Exception as exc:
             self.logger.error("Investigation failed investigation_id=%s: %s", investigation_id, exc)
             return self._failure_report(
-                alert, investigation_id, str(exc), requests, tool_calls, started
+                alert, investigation_id, str(exc), requests, tool_calls,
+                successful_tool_calls, failed_tool_calls, tool_results,
+                token_usage, started, finalization_reason,
             )
 
     def _execute_call(self, call: Any, investigation_id: str) -> ToolResult:
@@ -167,6 +250,16 @@ class TriageAgent:
         return response_id if isinstance(response_id, str) and response_id else None
 
     @staticmethod
+    def _record_usage(response: Any, token_usage: dict[str, int]) -> None:
+        usage = _value(response, "usage", {})
+        if usage is None:
+            return
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = _value(usage, key)
+            if isinstance(value, int):
+                token_usage[key] = token_usage.get(key, 0) + value
+
+    @staticmethod
     def _function_call_input(call: Any) -> dict[str, Any]:
         return {
             "type": "function_call",
@@ -208,12 +301,18 @@ class TriageAgent:
         assessment: TriageAssessment,
         requests: int,
         tool_calls: int,
+        successful_tool_calls: int,
+        failed_tool_calls: int,
+        tool_results: list[ToolResult],
+        token_usage: dict[str, int],
         started: float,
+        execution_status: str = "completed",
+        finalization_reason: str | None = None,
     ) -> TriageReport:
         report = TriageReport(
             alert_id=alert.alert_id,
             investigation_id=investigation_id,
-            execution_status="completed",
+            execution_status=execution_status,
             assessment=assessment.assessment,
             proposed_action="CLOSE" if assessment.assessment == "false_positive" else "ESCALATE",
             severity=assessment.severity,
@@ -221,10 +320,21 @@ class TriageAgent:
             summary=assessment.summary,
             evidence=assessment.evidence,
             missing_evidence=assessment.missing_evidence,
-            recommended_next_steps=assessment.recommended_next_steps,
+            recommended_next_steps=(
+                assessment.recommended_next_steps
+                + (["Human review is required before implementing any closure decision."]
+                   if execution_status == "partial" else [])
+            ),
             tool_call_count=tool_calls,
             model_request_count=requests,
             processing_duration_seconds=time.monotonic() - started,
+            provisional=execution_status == "partial",
+            finalization_triggered_by_budget=execution_status == "partial",
+            finalization_reason=finalization_reason,
+            successful_tool_call_count=successful_tool_calls,
+            failed_tool_call_count=failed_tool_calls,
+            tool_results=tool_results,
+            token_usage=token_usage,
         )
         if self.settings.log_triage_results:
             self.logger.info("Triage result investigation_id=%s: %s", investigation_id, report.model_dump())
@@ -237,7 +347,12 @@ class TriageAgent:
         error: str,
         requests: int,
         tool_calls: int,
+        successful_tool_calls: int,
+        failed_tool_calls: int,
+        tool_results: list[ToolResult],
+        token_usage: dict[str, int],
         started: float,
+        finalization_reason: str | None = None,
     ) -> TriageReport:
         return TriageReport(
             alert_id=alert.alert_id,
@@ -253,4 +368,12 @@ class TriageAgent:
             tool_call_count=tool_calls,
             model_request_count=requests,
             processing_duration_seconds=time.monotonic() - started,
+            provisional=False,
+            finalization_triggered_by_budget=finalization_reason is not None,
+            finalization_reason=finalization_reason,
+            successful_tool_call_count=successful_tool_calls,
+            failed_tool_call_count=failed_tool_calls,
+            tool_results=tool_results,
+            token_usage=token_usage,
+            error=error,
         )

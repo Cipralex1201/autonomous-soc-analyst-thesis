@@ -126,7 +126,7 @@ class ToolResult(BaseModel):
 
 Assessment = Literal["true_positive", "false_positive", "uncertain"]
 ProposedAction = Literal["ESCALATE", "CLOSE"]
-ExecutionStatus = Literal["completed", "failed"]
+ExecutionStatus = Literal["completed", "partial", "failed"]
 
 
 class TriageAssessment(BaseModel):
@@ -154,6 +154,14 @@ class TriageReport(BaseModel):
     tool_call_count: int = Field(ge=0)
     model_request_count: int = Field(ge=0)
     processing_duration_seconds: float = Field(ge=0)
+    provisional: bool = False
+    finalization_triggered_by_budget: bool = False
+    finalization_reason: str | None = None
+    successful_tool_call_count: int = Field(default=0, ge=0)
+    failed_tool_call_count: int = Field(default=0, ge=0)
+    tool_results: list[ToolResult] = Field(default_factory=list)
+    token_usage: dict[str, int] = Field(default_factory=dict)
+    error: str | None = None
 
     @model_validator(mode="after")
     def enforce_action_mapping(self) -> "TriageReport":

@@ -117,6 +117,85 @@ def test_malformed_model_output_and_budget_exhaustion_escalate_safely() -> None:
     assert budget.execution_status == "failed"
 
 
+def test_model_budget_reserves_a_no_tools_finalization_request() -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*", "query": {"match_all": {}},
+        })], response_id="response-1"),
+        response([], json.dumps({
+            "assessment": "true_positive",
+            "severity": "medium",
+            "confidence": 0.7,
+            "summary": "Collected evidence supports the alert.",
+            "evidence": ["query result"],
+            "missing_evidence": ["authorization context"],
+            "recommended_next_steps": [],
+        })),
+    ]
+    tools = Mock()
+    tools.search_elasticsearch.return_value = ToolResult(
+        tool_name="search_elasticsearch", ok=True, data={"total_hits": 1}
+    )
+
+    report = TriageAgent(settings(max_model_requests=2), tools, openai).run(alert())
+
+    assert report.execution_status == "partial"
+    assert report.provisional is True
+    assert report.finalization_triggered_by_budget is True
+    assert report.assessment == "true_positive"
+    assert report.proposed_action == "ESCALATE"
+    assert report.tool_results[0].data["total_hits"] == 1
+    assert openai.responses.create.call_args_list[1].kwargs["tools"] == []
+
+
+def test_tool_budget_finalization_preserves_failed_and_successful_results() -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*", "query": {"match_all": {}},
+        }), function_call("discover_fields", {
+            "index": "logs-*", "field_prefix": "process.",
+        }, "call-2")], response_id="response-1"),
+        response([], json.dumps({
+            "assessment": "uncertain",
+            "severity": "low",
+            "confidence": 0.2,
+            "summary": "The investigation was incomplete.",
+            "evidence": [],
+            "missing_evidence": ["More telemetry"],
+            "recommended_next_steps": [],
+        })),
+    ]
+
+    report = TriageAgent(settings(max_tool_calls=1), Mock(), openai).run(alert())
+
+    assert report.execution_status == "partial"
+    assert report.tool_call_count == 0
+    assert report.finalization_reason == "SIEM tool-call budget exhausted"
+    assert openai.responses.create.call_args_list[1].kwargs["tools"] == []
+
+
+def test_finalization_failure_preserves_accumulated_evidence() -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*", "query": {"match_all": {}},
+        })], response_id="response-1"),
+        RuntimeError("finalization unavailable"),
+    ]
+    tools = Mock()
+    tools.search_elasticsearch.return_value = ToolResult(
+        tool_name="search_elasticsearch", ok=True, data={"total_hits": 3}
+    )
+
+    report = TriageAgent(settings(max_model_requests=2), tools, openai).run(alert())
+
+    assert report.execution_status == "failed"
+    assert report.tool_results[0].data["total_hits"] == 3
+    assert report.error == "finalization unavailable"
+
+
 def test_invalid_window_is_returned_and_valid_retry_can_continue_with_previous_response() -> None:
     openai = Mock()
     openai.responses.create.side_effect = [

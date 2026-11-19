@@ -139,10 +139,33 @@ def _validate_query_structure(value: Any, *, depth: int = 0, nodes: list[int] | 
         raise ValueError("query string exceeds safety limits")
 
 
+def _validate_query_dsl(value: Any) -> None:
+    """Catch common malformed DSL locally without changing the caller's query."""
+    if not isinstance(value, Mapping):
+        raise ValueError("query must be a JSON object")
+    range_query = value.get("range")
+    if isinstance(range_query, Mapping):
+        for field_name, bounds in range_query.items():
+            if not isinstance(bounds, Mapping):
+                raise ValueError(f"range query for {field_name!r} must be an object")
+            invalid = set(bounds) - {"gte", "gt", "lte", "lt", "format", "relation", "time_zone"}
+            if invalid:
+                names = ", ".join(sorted(map(str, invalid)))
+                raise ValueError(f"range query for {field_name!r} has invalid field(s): {names}")
+    for child in value.values():
+        if isinstance(child, Mapping):
+            _validate_query_dsl(child)
+        elif isinstance(child, list):
+            for item in child:
+                if isinstance(item, Mapping):
+                    _validate_query_dsl(item)
+
+
 def _validate_search_args(args: ElasticsearchSearchArgs, settings: Settings) -> None:
     if not _configured_index(settings, args.index):
         raise ValueError(index_authorization_error(settings, args.index))
     _validate_query_structure(args.query)
+    _validate_query_dsl(args.query)
     if args.aggregations is not None:
         _validate_query_structure(args.aggregations)
         _validate_aggregation_limits(args.aggregations)
@@ -463,7 +486,11 @@ class InvestigationTools:
                 ),
             )
         except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
-            return ToolResult(tool_name="search_elasticsearch", ok=False, error=str(exc))
+            return ToolResult(
+                tool_name="search_elasticsearch",
+                ok=False,
+                error=f"Elasticsearch query rejected: {str(exc)[:500]}",
+            )
 
     def discover_fields(self, args: DiscoverFieldsArgs) -> ToolResult:
         try:

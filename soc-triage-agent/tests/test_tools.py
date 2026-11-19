@@ -25,6 +25,19 @@ def test_http_tool_rejects_invalid_ip() -> None:
     assert "valid IP" in (result.error or "")
 
 
+def test_malformed_range_query_is_recoverable_before_elasticsearch() -> None:
+    elastic = Mock()
+    tools = InvestigationTools(elastic, Settings())
+    result = tools.search_elasticsearch(ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"range": {"@timestamp": {"gte": "now-1h", "lte": "now", "unexpected": 1}}},
+    ))
+
+    assert result.ok is False
+    assert "invalid field" in (result.error or "")
+    elastic.search.assert_not_called()
+
+
 def test_http_tool_builds_bounded_query() -> None:
     elastic = Mock()
     elastic.search.return_value = {"hits": {"total": {"value": 4, "relation": "eq"}, "hits": []}}
