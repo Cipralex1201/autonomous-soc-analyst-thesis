@@ -167,7 +167,11 @@ def test_related_alerts_exclude_rule_guides_and_keep_detection_evidence() -> Non
         "rule_name": "Suspicious authentication",
         "severity": "high",
         "source_ip": "192.0.2.10",
-        "detection_evidence": {"event_count": 4},
+        "detection_evidence": {
+            "@timestamp": "2026-01-01T00:00:00Z",
+            "event_count": 4,
+            "source.ip": "192.0.2.10",
+        },
     }
     assert "investigation guide" not in str(result.data)
     assert "full detection query" not in str(result.data)

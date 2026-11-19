@@ -8,8 +8,8 @@ from typing import Any
 
 
 MAX_REPRESENTATIVE_VALUES = 10
-MAX_EVIDENCE_FIELDS = 24
-MAX_TEXT_LENGTH = 300
+MAX_TEXT_LENGTH = 4000
+MAX_EVIDENCE_FIELDS = 200
 
 _NOISY_NAMESPACES = {
     "agent",
@@ -22,10 +22,59 @@ _NOISY_NAMESPACES = {
 }
 _EVIDENCE_NAMESPACES = {
     "authentication",
+    "custom",
     "detection",
     "esql",
+    "eql",
+    "indicator",
+    "observables",
+    "security",
+    "signal",
     "threat",
 }
+_ALLOWED_EVIDENCE_PREFIXES = (
+    "@timestamp",
+    "event.",
+    "host.",
+    "user.",
+    "process.",
+    "source.",
+    "destination.",
+    "client.",
+    "server.",
+    "network.",
+    "dns.",
+    "http.",
+    "url.",
+    "user_agent.",
+    "file.",
+    "authentication.",
+    "custom.",
+    "detection.",
+    "indicator.",
+    "observables.",
+    "security.",
+    "signal.",
+    "registry.",
+    "dll.",
+    "package.",
+    "cloud.",
+    "container.",
+    "orchestrator.",
+    "threat.",
+    "vulnerability.",
+    "tls.",
+    "x509.",
+    "email.",
+    "rule.",
+    "winlog.",
+    "powershell.",
+    "m365.",
+    "azure.",
+    "aws.",
+    "gcp.",
+    "o365.",
+)
 
 
 def field(source: Mapping[str, Any], *path: str) -> Any:
@@ -120,48 +169,87 @@ def compact_alert(alert_id: str, source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def compact_detection_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep useful detection statistics and bounded custom evidence."""
+def compact_detection_evidence(
+    source: Mapping[str, Any],
+    *,
+    max_text_length: int = MAX_TEXT_LENGTH,
+    max_fields: int = MAX_EVIDENCE_FIELDS,
+) -> dict[str, Any]:
+    """Keep useful ECS and detection-specific evidence without Elastic rule metadata."""
     event_count: int | float | None = None
     distinct_url_count: int | float | None = None
     url_values: list[str] = []
     custom: dict[str, Any] = {}
-
-    def visit(value: Any, namespace: str | None = None) -> None:
-        nonlocal event_count, distinct_url_count
-        if isinstance(value, Mapping):
-            for key, child in value.items():
-                key_text = str(key)
-                normalized = key_text.lower().replace(".", "_")
-                child_namespace = namespace or normalized
-                if normalized.endswith("event_count") and isinstance(child, (int, float)):
-                    event_count = child
-                elif normalized.endswith("url_original_count_distinct") and isinstance(child, (int, float)):
-                    distinct_url_count = child
-                elif "url_original" in normalized and isinstance(child, list):
-                    url_values.extend(item for item in child if isinstance(item, str))
-                if (
-                    namespace is None
-                    and child_namespace in _EVIDENCE_NAMESPACES
-                    and child_namespace not in _NOISY_NAMESPACES
-                    and child_namespace not in custom
-                ):
-                    bounded = _bounded_value(
-                        child,
-                        skip_tokens={"event_count", "url_original"},
-                    )
-                    if not (
-                        isinstance(bounded, Mapping)
-                        and not any(not str(key).startswith("_") for key in bounded)
-                    ):
-                        custom[child_namespace] = bounded
-                visit(child, child_namespace)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item, namespace)
-
-    visit(source)
     evidence: dict[str, Any] = {}
+
+    def flatten(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+        if isinstance(value, Mapping):
+            fields: list[tuple[str, Any]] = []
+            for key, child in value.items():
+                name = f"{prefix}.{key}" if prefix else str(key)
+                if isinstance(child, Mapping):
+                    fields.extend(flatten(child, name))
+                else:
+                    fields.append((name, child))
+            return fields
+        return [(prefix, value)] if prefix else []
+
+    def blocked(name: str) -> bool:
+        lower = name.lower()
+        return (
+            lower.startswith("kibana.")
+            or lower.startswith("elastic_agent.")
+            or lower.startswith("ecs.")
+            or lower.startswith("log.")
+            or lower.startswith("observer.")
+            or lower.startswith("agent.")
+            or lower.startswith("input.")
+            or lower.startswith("event.ingested")
+            or lower.startswith("event.created")
+            or lower.startswith("_")
+        )
+
+    for name, value in flatten(source):
+        lower = name.lower()
+        if blocked(name):
+            continue
+        normalized = lower.replace(".", "_")
+        if normalized.endswith("event_count") and isinstance(value, (int, float)):
+            event_count = value
+        elif normalized.endswith("url_original_count_distinct") and isinstance(value, (int, float)):
+            distinct_url_count = value
+        elif "url_original" in normalized and isinstance(value, list):
+            url_values.extend(item for item in value if isinstance(item, str))
+
+        top_namespace = name.split(".", 1)[0].lower()
+        allowed = name.startswith(_ALLOWED_EVIDENCE_PREFIXES)
+        custom_namespace = (
+            top_namespace in _EVIDENCE_NAMESPACES
+            or top_namespace in {"esql", "eql"}
+        )
+        if allowed:
+            if len(evidence) >= max_fields:
+                evidence["_omitted_fields"] = int(evidence.get("_omitted_fields", 0)) + 1
+                continue
+            evidence[name] = _compact_scalar(
+                value,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+            )
+
+    for top_name, child in source.items():
+        top_namespace = str(top_name).lower()
+        if top_namespace in _EVIDENCE_NAMESPACES or top_namespace in {"esql", "eql"}:
+            bounded = _bounded_value(
+                child,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+                skip_tokens={"event_count", "url_original"},
+            )
+            if isinstance(bounded, Mapping) and any(
+                not str(key).startswith("_") for key in bounded
+            ):
+                custom[top_namespace] = bounded
     if event_count is not None:
         evidence["event_count"] = event_count
     if distinct_url_count is not None:
@@ -179,13 +267,27 @@ def compact_detection_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
     return evidence
 
 
-def _compact_scalar(value: Any) -> Any:
+def _compact_scalar(
+    value: Any,
+    *,
+    max_text_length: int = MAX_TEXT_LENGTH,
+    max_fields: int = MAX_EVIDENCE_FIELDS,
+) -> Any:
     if isinstance(value, str):
-        return value if len(value) <= MAX_TEXT_LENGTH else f"{value[:MAX_TEXT_LENGTH]}… [omitted]"
+        if len(value) <= max_text_length:
+            return value
+        return f"{value[:max_text_length]}… [omitted {len(value) - max_text_length} characters]"
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, list):
-        values = [_compact_scalar(item) for item in value]
+        values = [
+            _compact_scalar(
+                item,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+            )
+            for item in value
+        ]
         ordered = sorted(values, key=lambda item: json.dumps(item, sort_keys=True, default=str))
         result: dict[str, Any] = {
             "count": len(values),
@@ -195,13 +297,27 @@ def _compact_scalar(value: Any) -> Any:
             result["omitted_count"] = len(values) - MAX_REPRESENTATIVE_VALUES
         return result
     if isinstance(value, Mapping):
-        return _bounded_value(value)
+        return _bounded_value(
+            value,
+            max_text_length=max_text_length,
+            max_fields=max_fields,
+        )
     return str(value)
 
 
-def _bounded_value(value: Any, skip_tokens: set[str] | None = None) -> Any:
+def _bounded_value(
+    value: Any,
+    skip_tokens: set[str] | None = None,
+    *,
+    max_text_length: int = MAX_TEXT_LENGTH,
+    max_fields: int = MAX_EVIDENCE_FIELDS,
+) -> Any:
     if not isinstance(value, Mapping):
-        return _compact_scalar(value)
+        return _compact_scalar(
+            value,
+            max_text_length=max_text_length,
+            max_fields=max_fields,
+        )
     items = sorted(value.items(), key=lambda item: str(item[0]))
     result: dict[str, Any] = {}
     omitted = 0
@@ -213,13 +329,22 @@ def _bounded_value(value: Any, skip_tokens: set[str] | None = None) -> Any:
         ):
             omitted += 1
             continue
-        if len(result) >= MAX_EVIDENCE_FIELDS:
+        if len(result) >= max_fields:
             omitted += 1
             continue
         result[str(key)] = (
-            _bounded_value(child, skip_tokens=skip_tokens)
+            _bounded_value(
+                child,
+                skip_tokens=skip_tokens,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+            )
             if isinstance(child, Mapping)
-            else _compact_scalar(child)
+            else _compact_scalar(
+                child,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+            )
         )
     if omitted:
         result["_omitted_fields"] = omitted

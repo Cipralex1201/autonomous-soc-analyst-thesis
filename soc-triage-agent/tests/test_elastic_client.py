@@ -44,6 +44,98 @@ def test_alert_normalization_marks_missing_provenance() -> None:
 
     assert alert.telemetry_provenance == "missing"
 
+
+def test_windows_process_alert_preserves_security_relevant_evidence() -> None:
+    alert = ElasticClient.normalize_alert(
+        "alert-windows",
+        {
+            "event": {"dataset": "windows.sysmon_operational", "category": ["process"], "kind": "signal"},
+            "host": {
+                "name": "cloud-29250",
+                "id": "98584165-a96a-486d-9e0b-41f0c992a9db",
+            },
+            "user": {"name": "cloud", "id": "S-1-5-18"},
+            "process": {
+                "executable": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "command_line": r'"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command Get-Process',
+                "entity_id": "{98584165-ABE6-6AFB-0909-000000003700}",
+                "pid": 9492,
+                "hash": {"sha256": "9785001b0dcf755eddb8af294a373c0b87b2498660f724e76c4d53f9c217c7a3"},
+                "parent": {
+                    "name": "wscript.exe",
+                    "command_line": r'"C:\WINDOWS\system32\wscript.exe" C:\Users\cloud\AppData\Local\Temp\soc-lab-test.js',
+                },
+            },
+            "kibana": {"alert": {"rule": {"parameters": {"note": "large investigation guide"}}}},
+        },
+        "logs-windows.sysmon_operational-*",
+    )
+
+    evidence = alert.detection_evidence
+    assert evidence["process.executable"].endswith(r"powershell.exe")
+    assert evidence["process.command_line"].endswith("Get-Process")
+    assert evidence["process.entity_id"] == "{98584165-ABE6-6AFB-0909-000000003700}"
+    assert evidence["process.pid"] == 9492
+    assert evidence["process.parent.command_line"].startswith('"C:\\WINDOWS')
+    assert evidence["process.hash.sha256"] == "9785001b0dcf755eddb8af294a373c0b87b2498660f724e76c4d53f9c217c7a3"
+    assert evidence["host.name"] == "cloud-29250"
+    assert evidence["host.id"] == "98584165-a96a-486d-9e0b-41f0c992a9db"
+    assert evidence["user.name"] == "cloud"
+    assert evidence["user.id"] == "S-1-5-18"
+    assert "kibana" not in str(evidence)
+    assert "investigation guide" not in str(evidence)
+
+
+def test_generic_alert_normalization_supports_authentication_file_dns_and_http() -> None:
+    alert = ElasticClient.normalize_alert(
+        "alert-generic",
+        {
+            "event": {"category": ["authentication", "file", "network"], "dataset": "generic.logs"},
+            "user": {"name": "alice", "id": "u-123"},
+            "authentication": {"outcome": "failure"},
+            "file": {"path": r"C:\Temp\payload.exe", "hash": {"sha256": "abc123"}},
+            "dns": {"question": {"name": "example.test"}, "resolved_ip": ["192.0.2.44"]},
+            "network": {"transport": "tcp", "direction": "egress"},
+            "source": {"ip": "192.0.2.10"},
+            "destination": {"ip": "198.51.100.20", "port": 443},
+            "http": {"request": {"method": "POST"}, "response": {"status_code": 404}},
+            "url": {"path": "/upload", "domain": "example.test"},
+            "Esql": {"event_count": 12, "detected_entities": ["entity-a"]},
+        },
+    )
+
+    evidence = alert.detection_evidence
+    assert evidence["authentication.outcome"] == "failure"
+    assert evidence["file.path"] == r"C:\Temp\payload.exe"
+    assert evidence["dns.question.name"] == "example.test"
+    assert evidence["network.transport"] == "tcp"
+    assert evidence["http.request.method"] == "POST"
+    assert evidence["url.path"] == "/upload"
+    assert evidence["event_count"] == 12
+    assert evidence["custom"]["esql"]["detected_entities"]["representative"] == ["entity-a"]
+
+
+def test_alert_evidence_marks_field_and_text_omissions() -> None:
+    alert = ElasticClient.normalize_alert(
+        "alert-long",
+        {
+            "process": {
+                "command_line": "x" * 500,
+                "executable": "C:\\Temp\\payload.exe",
+            },
+            "custom": {
+                f"field_{index}": index
+                for index in range(30)
+            },
+        },
+        max_text_length=100,
+        max_fields=1,
+    )
+
+    evidence = alert.detection_evidence
+    assert "[omitted 400 characters]" in evidence["process.command_line"]
+    assert "_omitted_fields" in evidence
+
 def test_search_rejects_unconfigured_index() -> None:
     client = ElasticClient(Settings(), client=Mock())
     try:

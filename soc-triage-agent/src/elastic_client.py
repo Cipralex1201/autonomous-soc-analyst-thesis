@@ -55,6 +55,8 @@ class ElasticClient:
             response.get("_id", alert_id),
             response.get("_source", {}),
             response.get("_index"),
+            max_text_length=self.settings.max_alert_field_text_length,
+            max_fields=self.settings.max_alert_evidence_fields,
         )
 
     def search_alerts(self, *, query: Mapping[str, Any], size: int = 100) -> list[AlertContext]:
@@ -65,7 +67,13 @@ class ElasticClient:
             size=min(size, 1000),
         )
         return [
-            self.normalize_alert(hit.get("_id", ""), hit.get("_source", {}), hit.get("_index"))
+            self.normalize_alert(
+                hit.get("_id", ""),
+                hit.get("_source", {}),
+                hit.get("_index"),
+                max_text_length=self.settings.max_alert_field_text_length,
+                max_fields=self.settings.max_alert_evidence_fields,
+            )
             for hit in response.get("hits", {}).get("hits", [])
         ]
 
@@ -74,6 +82,8 @@ class ElasticClient:
         alert_id: str,
         source: Mapping[str, Any],
         originating_index: str | None = None,
+        max_text_length: int = 4000,
+        max_fields: int = 200,
     ) -> AlertContext:
         """Normalize optional Elastic alert fields without assuming an HTTP schema."""
         event_ids = source.get("event", {}).get("id", []) if isinstance(source.get("event"), Mapping) else []
@@ -104,7 +114,11 @@ class ElasticClient:
             host_name=field(source, "host", "name"),
             user_name=field(source, "user", "name"),
             event_ids=list(event_ids),
-            detection_evidence=compact_detection_evidence(source),
+            detection_evidence=compact_detection_evidence(
+                source,
+                max_text_length=max_text_length,
+                max_fields=max_fields,
+            ),
             telemetry_datasets=datasets,
             originating_indices=indices,
             telemetry_provenance=provenance,

@@ -23,6 +23,8 @@ LLM-related settings are:
 * `LOG_LLM_REQUESTS`, `LOG_LLM_RESPONSES`, `LOG_TOOL_CALLS`,
   `LOG_TOOL_RESULTS`, and `LOG_TRIAGE_RESULTS`.
 * `MAX_TOOL_CALLS` and `MAX_MODEL_REQUESTS` bound each investigation.
+* `MAX_ALERT_FIELD_TEXT_LENGTH` and `MAX_ALERT_EVIDENCE_FIELDS` bound generic
+  ECS and custom field evidence included in the initial alert context.
 
 Prompt logging shows the sanitized payload passed to the SDK. `pause` requires
 a TTY and prints the exact payload passed to the SDK before every model
