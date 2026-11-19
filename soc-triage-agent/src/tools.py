@@ -485,7 +485,9 @@ class InvestigationTools:
                     max_bytes=self.settings.max_tool_result_bytes,
                 ),
             )
-        except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
+        except ValueError as exc:
+            return ToolResult(tool_name="search_elasticsearch", ok=False, error=str(exc))
+        except (ApiError, TransportError, KeyError, TypeError) as exc:
             return ToolResult(
                 tool_name="search_elasticsearch",
                 ok=False,
