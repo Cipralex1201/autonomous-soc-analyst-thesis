@@ -37,7 +37,25 @@ class ElasticClient:
         return self.writer_client or self.client
 
     def ensure_trace_mappings(self) -> None:
-        """Create the two trace mappings when explicit writer privileges permit it."""
+        """Create trace indices and add searchable metric mappings without replacing data."""
+        trace_metric_properties = {
+            "input_tokens": {"type": "integer"},
+            "output_tokens": {"type": "integer"},
+            "total_tokens": {"type": "integer"},
+            "cached_input_tokens": {"type": "integer"},
+            "reasoning_output_tokens": {"type": "integer"},
+            "api_latency_seconds": {"type": "double"},
+            "tool_name": {"type": "keyword"},
+            "tool_status": {"type": "keyword"},
+            "tool_call_number": {"type": "integer"},
+            "total_hits": {"type": "long"},
+            "returned_hits": {"type": "integer"},
+            "result_size_bytes": {"type": "long"},
+            "truncated": {"type": "boolean"},
+            "sampled": {"type": "boolean"},
+            "aggregation_names": {"type": "keyword"},
+            "failure_category": {"type": "keyword"},
+        }
         trace_mapping = {
             "mappings": {
                 "dynamic": False,
@@ -54,6 +72,7 @@ class ElasticClient:
                     "call_id": {"type": "keyword"},
                     "response_id": {"type": "keyword"},
                     "model_request_number": {"type": "integer"},
+                    **trace_metric_properties,
                     "tool": {"type": "object", "enabled": False},
                     "llm": {"type": "object", "enabled": False},
                     "metrics": {"type": "object", "enabled": False},
@@ -97,6 +116,10 @@ class ElasticClient:
         writer = self._trace_writer()
         writer.indices.create(index=self.settings.elastic_triage_traces_index, body=trace_mapping, ignore=400)
         writer.indices.create(index=self.settings.elastic_triage_results_index, body=result_mapping, ignore=400)
+        writer.indices.put_mapping(
+            index=self.settings.elastic_triage_traces_index,
+            body={"properties": trace_metric_properties},
+        )
 
     def index_trace_event(self, index: str, investigation_id: str, sequence: int, event: Mapping[str, Any]) -> Any:
         document = dict(event)

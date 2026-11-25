@@ -106,7 +106,12 @@ class ElasticsearchSearchArgs(BaseModel):
     aggregations: dict[str, Any] | None = None
     source_fields: list[str] | None = None
     sort: list[dict[str, Any]] | None = None
-    size: int = Field(default=25, gt=0, le=1000)
+    size: int = Field(
+        default=25,
+        ge=0,
+        le=1000,
+        description="Maximum documents to return; use 0 for aggregation-only queries.",
+    )
 
 
 class DiscoverFieldsArgs(BaseModel):
@@ -122,6 +127,10 @@ class ToolResult(BaseModel):
     ok: bool
     data: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    failure_category: Literal["validation", "execution"] | None = Field(
+        default=None,
+        exclude=True,
+    )
 
 
 Assessment = Literal["true_positive", "false_positive", "uncertain"]

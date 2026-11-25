@@ -195,6 +195,43 @@ def test_search_passes_source_filter_and_timeout_to_elasticsearch() -> None:
     assert request["timeout"] == "10s"
 
 
+def test_aggregation_only_search_omits_source_retrieval_and_sorting() -> None:
+    client_api = Mock()
+    client_api.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}}
+    client = ElasticClient(Settings(), client=client_api)
+
+    client.search(
+        index="logs-*",
+        query={"match_all": {}},
+        size=0,
+        aggregations={"by_status": {"terms": {"field": "http.response.status_code"}}},
+    )
+
+    request = client_api.search.call_args.kwargs
+    assert request["size"] == 0
+    assert request["aggregations"] == {
+        "by_status": {"terms": {"field": "http.response.status_code"}}
+    }
+    assert "_source" not in request
+    assert "sort" not in request
+
+
+def test_trace_mappings_add_searchable_step_metrics() -> None:
+    client_api = Mock()
+    client = ElasticClient(Settings(), client=client_api)
+
+    client.ensure_trace_mappings()
+
+    mapping = client_api.indices.put_mapping.call_args.kwargs["body"]["properties"]
+    assert mapping["input_tokens"] == {"type": "integer"}
+    assert mapping["api_latency_seconds"] == {"type": "double"}
+    assert mapping["tool_status"] == {"type": "keyword"}
+    assert mapping["total_hits"] == {"type": "long"}
+    assert mapping["aggregation_names"] == {"type": "keyword"}
+    assert mapping["failure_category"] == {"type": "keyword"}
+    assert client_api.indices.create.call_count == 2
+
+
 def test_field_caps_uses_client_request_timeout_not_field_caps_keyword() -> None:
     client_api = Mock()
     request_client = Mock()

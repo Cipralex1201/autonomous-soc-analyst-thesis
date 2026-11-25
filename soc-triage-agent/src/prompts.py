@@ -10,7 +10,7 @@ from .schemas import AlertContext
 from .observability import sanitize
 
 
-PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "soc_l1_system_v1.txt"
+PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "soc_l1_system_v2.txt"
 MAX_RULE_DESCRIPTION_LENGTH = 1200
 
 

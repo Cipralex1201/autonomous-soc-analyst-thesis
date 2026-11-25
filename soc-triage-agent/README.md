@@ -54,6 +54,11 @@ result back in a follow-up Responses API call using the Responses conversation
 state and matching function-call IDs. Arbitrary Elasticsearch DSL and shell
 execution are not available; generic Query DSL is accepted only through the
 validated read-only search tool.
+For statistical questions, the model is encouraged to use aggregations with
+`size=0`; when representative documents are useful, it should prefer a small
+bounded sample. Larger raw-event retrieval should answer a concrete question
+that aggregations cannot resolve, without restricting the model's choice of
+investigation criteria.
 
 For general investigations the model can use `discover_fields` followed by
 `search_elasticsearch`. Field discovery accepts prefixes or wildcard patterns,
@@ -118,10 +123,12 @@ the correlation key.
 Each JSONL file contains chronological `investigation.started`, `llm.request`,
 `llm.response`, `tool.called`, `tool.completed` or `tool.failed`, and final
 investigation events. Requests include exact Responses API parameters,
-including `previous_response_id`; responses include SDK output and reported
-usage. Tool completions include validated arguments and the actual bounded
-Elasticsearch DSL. API keys and authorization values are never included in
-trace configuration.
+including `previous_response_id`; responses retain output items, function-call
+arguments, response metadata, usage, and latency without duplicating the full
+SDK response or storing opaque `encrypted_content` reasoning payloads. Tool
+events retain original and validated arguments, the actual bounded Elasticsearch
+request, compact results, errors, and final verdicts. API keys and authorization
+values are never included in trace configuration.
 
 Elasticsearch persistence uses `soc-triage-traces-v1` for events and
 `soc-triage-results-v1` for one final document per investigation. The writer
@@ -133,11 +140,16 @@ erase the local JSONL archive.
 
 Create a writer API key with these privileges:
 
-* `manage_index_templates` or the narrower index create privileges for
-  `soc-triage-traces-v1` and `soc-triage-results-v1`
+* `manage` on `soc-triage-traces-v1` so existing trace indices can receive
+  additive searchable-field mappings
 * `create_index`, `create_doc`, and `index` or `all` on those two indices
 * no read or write access to alert or telemetry indices is needed beyond the
   existing read credential
+
+Trace mapping updates add explicitly typed root-level metric fields to the
+existing versioned index; they do not delete, reindex, or replace existing
+investigation records. Nested Query DSL and result content remain disabled for
+dynamic indexing.
 
 In Kibana Stack Management, create data views named
 `SOC triage traces` for `soc-triage-traces-v1` and `SOC triage results` for
@@ -161,8 +173,33 @@ FROM soc-triage-traces-v1
 ```esql
 FROM soc-triage-traces-v1
 | WHERE event_type == "tool.failed"
-| KEEP @timestamp, investigation_id, alert_id, call_id, tool.name, error
+| KEEP @timestamp, investigation_id, alert_id, call_id, tool_call_number,
+    tool_name, tool_status, failure_category, error
 | SORT @timestamp DESC
+```
+
+Compare request tokens and latency by investigation:
+
+```esql
+FROM soc-triage-traces-v1
+| WHERE event_type == "llm.response"
+| STATS requests = COUNT(*), input_tokens = SUM(input_tokens),
+    output_tokens = SUM(output_tokens), cached_tokens = SUM(cached_input_tokens),
+    reasoning_tokens = SUM(reasoning_output_tokens),
+    avg_latency_seconds = AVG(api_latency_seconds) BY investigation_id
+| SORT avg_latency_seconds DESC
+```
+
+Compare search result efficiency and truncation:
+
+```esql
+FROM soc-triage-traces-v1
+| WHERE event_type == "tool.completed" AND tool_name == "search_elasticsearch"
+| STATS searches = COUNT(*), matched_hits = SUM(total_hits),
+    returned_hits = SUM(returned_hits), result_bytes = SUM(result_size_bytes),
+    truncated_searches = COUNT_IF(truncated), sampled_searches = COUNT_IF(sampled)
+    BY investigation_id
+| SORT result_bytes DESC
 ```
 
 ```esql

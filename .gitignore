@@ -1,6 +1,6 @@
 /other/
 /pentest-basics-training/
-
+/soc-triage-agent/log-a*.txt
 # Secrets
 .env
 .env.*
@@ -15,3 +15,6 @@ __pycache__/
 # Local data
 *.db
 *.sqlite3
+
+# Logs
+/soc-triage-agent/logs/

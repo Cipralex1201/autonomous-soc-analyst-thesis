@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
+from elastic_transport import TransportError
+
 from src.agent import TriageAgent
 from src.config import Settings
 from src.elastic_client import ElasticClient
@@ -440,7 +442,221 @@ def test_assembled_openai_payload_uses_strict_structured_output_schemas() -> Non
     generic = next(tool for tool in payload["tools"] if tool["name"] == "search_elasticsearch")
     assert generic["strict"] is False
     assert generic["parameters"]["properties"]["query"]["type"] == "object"
+    assert generic["parameters"]["properties"]["size"]["minimum"] == 0
+    assert "size=0" in generic["description"]
+    assert "small bounded sample" in generic["description"]
+    assert "Use size=0" in payload["instructions"]
+    assert "concrete investigative question" in payload["instructions"]
     output_schema = payload["text"]["format"]["schema"]
     assert output_schema["additionalProperties"] is False
     assert set(output_schema["required"]) == set(output_schema["properties"])
     assert output_schema["properties"]["evidence"]["type"] == "array"
+
+
+def test_trace_keeps_auditable_sequence_without_duplicate_sdk_response_or_ciphertext(tmp_path) -> None:
+    openai = Mock()
+    first = {
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Check the matching events."}],
+                "encrypted_content": "opaque-reasoning-payload",
+            },
+            function_call(
+                "search_elasticsearch",
+                {
+                    "index": "logs-*",
+                    "query": {"term": {"source.ip": "192.0.2.10"}},
+                    "aggregations": {
+                        "by_status": {
+                            "terms": {"field": "http.response.status_code", "size": 5}
+                        }
+                    },
+                    "source_fields": ["@timestamp", "source.ip"],
+                    "size": 1,
+                },
+            ),
+        ],
+        "output_text": None,
+        "id": "response-1",
+        "status": "completed",
+        "model": "test-model",
+        "usage": {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 5},
+            "output_tokens_details": {"reasoning_tokens": 3},
+        },
+    }
+    final = {
+        "output": [],
+        "output_text": json.dumps({
+            "assessment": "true_positive",
+            "severity": "medium",
+            "confidence": 0.8,
+            "summary": "The evidence supports the detection.",
+            "evidence": ["A matching event was observed."],
+            "missing_evidence": [],
+            "recommended_next_steps": [],
+        }),
+        "id": "response-2",
+        "status": "completed",
+        "model": "test-model",
+        "usage": {},
+    }
+    openai.responses.create.side_effect = [first, final]
+
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {
+            "total": {"value": 2},
+            "hits": [{
+                "_id": "event-1",
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "source.ip": "192.0.2.10",
+                },
+            }],
+        },
+        "aggregations": {
+            "by_status": {
+                "buckets": [{"key": 200, "doc_count": 2}]
+            }
+        },
+    }
+    runtime_settings = settings(
+        investigation_trace_directory=str(tmp_path),
+        investigation_trace_elastic_enabled=False,
+    )
+    report = TriageAgent(runtime_settings, InvestigationTools(elastic, runtime_settings), openai).run(alert())
+
+    events = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    response_event = next(event for event in events if event["event_type"] == "llm.response")
+    tool_event = next(event for event in events if event["event_type"] == "tool.completed")
+    tool_called = next(event for event in events if event["event_type"] == "tool.called")
+    request_events = [event for event in events if event["event_type"] == "llm.request"]
+    output = response_event["llm"]["output"]
+
+    assert report.assessment == "true_positive"
+    assert "response" not in response_event["llm"]
+    assert response_event["response_id"] == "response-1"
+    assert response_event["status"] == "completed"
+    assert response_event["model_request_number"] == 1
+    assert response_event["input_tokens"] == 20
+    assert response_event["output_tokens"] == 8
+    assert response_event["total_tokens"] == 28
+    assert response_event["cached_input_tokens"] == 5
+    assert response_event["reasoning_output_tokens"] == 3
+    assert response_event["api_latency_seconds"] >= 0
+    assert response_event["llm"]["metadata"]["model"] == "test-model"
+    assert output[0]["summary"][0]["text"] == "Check the matching events."
+    assert "encrypted_content" not in output[0]
+    assert output[1]["arguments"] == (
+        '{"index": "logs-*", "query": {"term": {"source.ip": "192.0.2.10"}}, '
+        '"aggregations": {"by_status": {"terms": {"field": "http.response.status_code", "size": 5}}}, '
+        '"source_fields": ["@timestamp", "source.ip"], "size": 1}'
+    )
+    assert request_events[0]["llm"]["parameters"]["instructions"]
+    assert request_events[0]["llm"]["parameters"]["tools"]
+    assert request_events[1]["llm"]["parameters"]["previous_response_id"] == "response-1"
+    assert request_events[1]["llm"]["parameters"]["input"][0]["type"] == "function_call_output"
+    assert tool_event["tool_name"] == "search_elasticsearch"
+    assert tool_event["tool_status"] == "completed"
+    assert tool_event["tool_call_number"] == 1
+    assert tool_event["total_hits"] == 2
+    assert tool_event["returned_hits"] == 1
+    assert tool_event["result_size_bytes"] > 0
+    assert tool_event["sampled"] is True
+    assert tool_event["truncated"] is False
+    assert tool_event["aggregation_names"] == ["by_status"]
+    assert tool_called["tool"]["requested_arguments"]
+    assert tool_event["tool"]["validated_arguments"]["size"] == 1
+    assert tool_event["tool"]["executed_elasticsearch_dsl"]["query"] == {
+        "term": {"source.ip": "192.0.2.10"}
+    }
+    completed = next(event for event in events if event["event_type"] == "investigation.completed")
+    assert completed["final"]["verdict"]["assessment"] == "true_positive"
+    assert "opaque-reasoning-payload" not in json.dumps(events)
+
+
+def test_trace_classifies_tool_argument_rejection_and_preserves_validated_args(tmp_path) -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*",
+            "query": {"range": {"@timestamp": {"gte": "now-1h", "invalid": "now"}}},
+            "size": 0,
+        })], response_id="response-1"),
+        response([], json.dumps({
+            "assessment": "uncertain",
+            "severity": "low",
+            "confidence": 0,
+            "summary": "The query was rejected.",
+            "evidence": [],
+            "missing_evidence": ["A valid search result"],
+            "recommended_next_steps": [],
+        })),
+    ]
+    runtime_settings = settings(
+        investigation_trace_directory=str(tmp_path),
+        investigation_trace_elastic_enabled=False,
+    )
+    report = TriageAgent(runtime_settings, InvestigationTools(Mock(), runtime_settings), openai).run(alert())
+
+    events = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    failure = next(event for event in events if event["event_type"] == "tool.failed")
+
+    assert report.assessment == "uncertain"
+    assert failure["tool_name"] == "search_elasticsearch"
+    assert failure["tool_status"] == "failed"
+    assert failure["tool_call_number"] == 1
+    assert failure["failure_category"] == "validation"
+    assert failure["tool"]["requested_arguments"]
+    assert failure["tool"]["validated_arguments"]["size"] == 0
+    assert failure["tool"]["executed_elasticsearch_dsl"] is None
+
+
+def test_trace_indexes_elasticsearch_execution_failure_category(tmp_path) -> None:
+    openai = Mock()
+    openai.responses.create.side_effect = [
+        response([function_call("search_elasticsearch", {
+            "index": "logs-*",
+            "query": {"match_all": {}},
+        })], response_id="response-1"),
+        response([], json.dumps({
+            "assessment": "uncertain",
+            "severity": "low",
+            "confidence": 0,
+            "summary": "The search failed.",
+            "evidence": [],
+            "missing_evidence": ["Search results"],
+            "recommended_next_steps": [],
+        })),
+    ]
+    elastic = Mock()
+    elastic.search.side_effect = TransportError("simulated transport failure")
+    runtime_settings = settings(
+        investigation_trace_directory=str(tmp_path),
+        investigation_trace_elastic_enabled=False,
+    )
+
+    report = TriageAgent(runtime_settings, InvestigationTools(elastic, runtime_settings), openai).run(alert())
+
+    events = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    failure = next(event for event in events if event["event_type"] == "tool.failed")
+
+    assert report.assessment == "uncertain"
+    assert failure["failure_category"] == "execution"
+    assert failure["error"]["stage"] == "execution"
+    assert failure["duration_seconds"] >= 0
+    assert failure["result_size_bytes"] > 0

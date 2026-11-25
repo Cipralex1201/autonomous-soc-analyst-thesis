@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
+from elastic_transport import TransportError
+
 from src.config import Settings
 from src.schemas import (
     DiscoverFieldsArgs,
@@ -35,7 +37,22 @@ def test_malformed_range_query_is_recoverable_before_elasticsearch() -> None:
 
     assert result.ok is False
     assert "invalid field" in (result.error or "")
+    assert result.failure_category == "validation"
+    assert "failure_category" not in result.model_dump()
     elastic.search.assert_not_called()
+
+
+def test_search_reports_elasticsearch_transport_failures_separately() -> None:
+    elastic = Mock()
+    elastic.search.side_effect = TransportError("simulated transport failure")
+
+    result = InvestigationTools(elastic, Settings()).search_elasticsearch(
+        ElasticsearchSearchArgs(index="logs-*", query={"match_all": {}})
+    )
+
+    assert result.ok is False
+    assert result.failure_category == "execution"
+    assert "Elasticsearch query rejected" in (result.error or "")
 
 
 def test_http_tool_builds_bounded_query() -> None:
@@ -242,6 +259,118 @@ def test_generic_search_selects_http_filters_and_aggregations() -> None:
     assert request["query"] == args.query
     assert request["aggregations"] == args.aggregations
     assert request["timeout"] == "10s"
+
+
+def test_generic_search_supports_aggregation_only_results() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {"total": {"value": 18, "relation": "eq"}, "hits": []},
+        "aggregations": {
+            "by_status": {"buckets": [{"key": 200, "doc_count": 18}]}
+        },
+    }
+    args = ElasticsearchSearchArgs(
+        index="logs-*",
+        query={"term": {"http.response.status_code": 200}},
+        aggregations={
+            "by_status": {
+                "terms": {"field": "http.response.status_code", "size": 5}
+            }
+        },
+        size=0,
+    )
+
+    result = InvestigationTools(elastic, Settings()).search_elasticsearch(args)
+
+    assert result.ok is True
+    assert result.data["total_hits"] == 18
+    assert result.data["returned_hits"] == 0
+    assert result.data["aggregation_only"] is True
+    assert result.data["sampled"] is False
+    assert result.data["truncated"] is False
+    assert result.data["aggregations"]["by_status"]["buckets"] == [
+        {"key": 200, "count": 18}
+    ]
+    request = elastic.search.call_args.kwargs
+    assert request["size"] == 0
+    assert request["source"] is None
+    assert request["sort"] is None
+
+
+def test_generic_search_reports_empty_aggregation_only_result() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+        "aggregations": {},
+    }
+
+    result = InvestigationTools(elastic, Settings()).search_elasticsearch(
+        ElasticsearchSearchArgs(
+            index="logs-*",
+            query={"term": {"source.ip": "192.0.2.10"}},
+            aggregations={"by_status": {"terms": {"field": "http.response.status_code"}}},
+            size=0,
+        )
+    )
+
+    assert result.ok is True
+    assert result.data["total_hits"] == 0
+    assert result.data["returned_hits"] == 0
+    assert result.data["aggregation_only"] is True
+    assert result.data["sampled"] is False
+    assert result.data["aggregations"] == {}
+
+
+def test_generic_search_default_source_fields_keep_document_compaction_bounded() -> None:
+    elastic = Mock()
+    elastic.search.return_value = {
+        "hits": {
+            "total": {"value": 1},
+            "hits": [{
+                "_id": "event-1",
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "process": {"name": "powershell.exe"},
+                },
+            }],
+        }
+    }
+
+    result = InvestigationTools(elastic, Settings()).search_elasticsearch(
+        ElasticsearchSearchArgs(index="logs-*", query={"match_all": {}}, size=1)
+    )
+
+    assert result.ok is True
+    assert result.data["returned_hits"] == 1
+    assert result.data["common_fields"]["process.name"] == "powershell.exe"
+
+
+def test_aggregation_only_query_still_rejects_invalid_query_and_bucket_limits() -> None:
+    elastic = Mock()
+    tools = InvestigationTools(elastic, Settings())
+
+    invalid_query = tools.search_elasticsearch(
+        ElasticsearchSearchArgs(
+            index="logs-*",
+            query={"range": {"@timestamp": {"gte": "now-1h", "invalid": "now"}}},
+            aggregations={"by_status": {"terms": {"field": "http.response.status_code"}}},
+            size=0,
+        )
+    )
+    invalid_bucket = tools.search_elasticsearch(
+        ElasticsearchSearchArgs(
+            index="logs-*",
+            query={"match_all": {}},
+            aggregations={"by_status": {"terms": {"field": "http.response.status_code", "size": 101}}},
+            size=0,
+        )
+    )
+
+    assert invalid_query.ok is False
+    assert "invalid field" in (invalid_query.error or "")
+    assert invalid_bucket.ok is False
+    assert "safety limits" in (invalid_bucket.error or "")
+    elastic.search.assert_not_called()
 
 
 def test_generic_search_supports_authentication_and_process_datasets() -> None:

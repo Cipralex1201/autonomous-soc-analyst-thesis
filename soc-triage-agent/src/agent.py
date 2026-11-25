@@ -179,15 +179,18 @@ class TriageAgent:
                 self._record_usage(response, token_usage)
                 output = list(_value(response, "output", []) or [])
                 if recorder is not None:
+                    usage = self._usage_payload(response)
                     recorder.record(
                         "llm.response",
                         model_request_number=requests,
                         response_id=self._response_id(response),
                         status=_value(response, "status"),
+                        api_latency_seconds=request_latency,
+                        **self._usage_metrics(usage),
                         llm={
-                            "output": output,
-                            "response": response,
-                            "usage": self._usage_payload(response),
+                            "output": self._trace_output(output),
+                            "metadata": self._response_metadata(response),
+                            "usage": usage,
                         },
                         metrics={
                             "llm_request_latency_seconds": request_latency,
@@ -223,7 +226,12 @@ class TriageAgent:
                     break
                 follow_up: list[Any] = []
                 for call in calls:
-                    result = self._execute_call(call, investigation_id, recorder)
+                    result = self._execute_call(
+                        call,
+                        investigation_id,
+                        recorder,
+                        tool_call_number=tool_calls + 1,
+                    )
                     tool_calls += 1
                     tool_results.append(result)
                     if result.ok:
@@ -306,15 +314,18 @@ class TriageAgent:
             self._record_usage(final_response, token_usage)
             if recorder is not None:
                 final_output = list(_value(final_response, "output", []) or [])
+                usage = self._usage_payload(final_response)
                 recorder.record(
                     "llm.response",
                     model_request_number=requests,
                     response_id=self._response_id(final_response),
                     status=_value(final_response, "status"),
+                    api_latency_seconds=request_latency,
+                    **self._usage_metrics(usage),
                     llm={
-                        "output": final_output,
-                        "response": final_response,
-                        "usage": self._usage_payload(final_response),
+                        "output": self._trace_output(final_output),
+                        "metadata": self._response_metadata(final_response),
+                        "usage": usage,
                     },
                     metrics={
                         "llm_request_latency_seconds": request_latency,
@@ -370,6 +381,7 @@ class TriageAgent:
         call: Any,
         investigation_id: str,
         recorder: InvestigationRecorder | None = None,
+        tool_call_number: int | None = None,
     ) -> ToolResult:
         name = _value(call, "name", "")
         raw_arguments = _value(call, "arguments", "{}")
@@ -379,6 +391,8 @@ class TriageAgent:
             recorder.record(
                 "tool.called",
                 call_id=call_id,
+                tool_name=name or "unknown",
+                tool_call_number=tool_call_number,
                 tool={"name": name or "unknown", "requested_arguments": raw_arguments},
             )
         if self.settings.log_tool_calls:
@@ -396,18 +410,30 @@ class TriageAgent:
             result = ToolResult(tool_name=name or "unknown", ok=False, error="unknown tool")
         else:
             model, function = models[name]
+            validated_arguments: dict[str, Any] | None = None
             try:
+                if hasattr(self.tools, "last_query"):
+                    self.tools.last_query = None
                 arguments = model.model_validate_json(raw_arguments)
+                validated_arguments = arguments.model_dump(mode="json")
                 result = function(arguments)
                 duration = time.monotonic() - tool_started
                 if recorder is not None:
                     if result.ok:
+                        tool_fields = self._tool_metric_fields(
+                            name,
+                            tool_call_number,
+                            duration,
+                            result.data,
+                            arguments,
+                        )
                         recorder.record(
                             "tool.completed",
                             call_id=call_id,
+                            **tool_fields,
                             tool={
                                 "name": name,
-                                "validated_arguments": arguments.model_dump(mode="json"),
+                                "validated_arguments": validated_arguments,
                                 "executed_elasticsearch_dsl": getattr(self.tools, "last_query", None),
                                 "result": result.data,
                                 "status": "completed",
@@ -415,16 +441,33 @@ class TriageAgent:
                                 "truncated": bool(result.data.get("truncated")),
                             },
                             metrics={"tool_execution_seconds": duration},
-                            duration_seconds=duration,
                         )
                     else:
+                        failure_category = (
+                            result.failure_category or self._failure_category(result.error)
+                        )
+                        tool_fields = self._tool_metric_fields(
+                            name,
+                            tool_call_number,
+                            duration,
+                            result.data,
+                            arguments,
+                            status="failed",
+                            result_size_bytes=serialized_size({"error": result.error}),
+                            failure_category=failure_category,
+                        )
                         recorder.record(
                             "tool.failed",
                             call_id=call_id,
-                            tool={"name": name, "requested_arguments": raw_arguments},
-                            error={"stage": "execution", "message": result.error},
+                            **tool_fields,
+                            tool={
+                                "name": name,
+                                "requested_arguments": raw_arguments,
+                                "validated_arguments": validated_arguments,
+                                "executed_elasticsearch_dsl": getattr(self.tools, "last_query", None),
+                            },
+                            error={"stage": failure_category, "message": result.error},
                             metrics={"tool_execution_seconds": duration},
-                            duration_seconds=duration,
                         )
                 if self.settings.log_tool_calls:
                     self.logger.info(
@@ -438,23 +481,46 @@ class TriageAgent:
                 result = ToolResult(tool_name=name, ok=False, error=f"invalid tool arguments: {exc}")
                 duration = time.monotonic() - tool_started
                 if recorder is not None:
+                    tool_fields = self._tool_metric_fields(
+                        name,
+                        tool_call_number,
+                        duration,
+                        {},
+                        status="failed",
+                        result_size_bytes=serialized_size({"error": str(exc)}),
+                        failure_category="validation",
+                    )
                     recorder.record(
                         "tool.failed",
                         call_id=call_id,
-                        tool={"name": name, "requested_arguments": raw_arguments},
+                        **tool_fields,
+                        tool={
+                            "name": name,
+                            "requested_arguments": raw_arguments,
+                            "validated_arguments": validated_arguments,
+                            "executed_elasticsearch_dsl": getattr(self.tools, "last_query", None),
+                        },
                         error={"stage": "validation", "message": str(exc)},
                         metrics={"tool_execution_seconds": duration},
-                        duration_seconds=duration,
                     )
         if name not in models and recorder is not None:
             duration = time.monotonic() - tool_started
+            tool_fields = self._tool_metric_fields(
+                name or "unknown",
+                tool_call_number,
+                duration,
+                {},
+                status="failed",
+                result_size_bytes=serialized_size({"error": "unknown tool"}),
+                failure_category="unknown_tool",
+            )
             recorder.record(
                 "tool.failed",
                 call_id=call_id,
+                **tool_fields,
                 tool={"name": name or "unknown", "requested_arguments": raw_arguments},
                 error={"stage": "validation", "message": "unknown tool"},
                 metrics={"tool_execution_seconds": duration},
-                duration_seconds=duration,
             )
         if self.settings.log_tool_results:
             self.logger.info("Tool result investigation_id=%s name=%s result=%s", investigation_id, name, sanitize(result.model_dump()))
@@ -484,12 +550,96 @@ class TriageAgent:
             token_usage["reasoning_output_tokens"] = token_usage.get("reasoning_output_tokens", 0) + reasoning
 
     def _usage_payload(self, response: Any) -> dict[str, Any]:
-        usage = _value(response, "usage", {})
+        usage = _value(response, "usage", None)
         if usage is None:
             return {}
+        if usage.__class__.__module__.startswith("unittest.mock"):
+            return {}
         if isinstance(usage, Mapping):
-            return dict(usage)
-        return json_safe(usage)
+            return json_safe(dict(usage))
+        converted = json_safe(usage)
+        return converted if isinstance(converted, dict) else {}
+
+    @staticmethod
+    def _usage_metrics(usage: Mapping[str, Any]) -> dict[str, int]:
+        metrics = {
+            key: usage[key]
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+            if isinstance(usage.get(key), int)
+        }
+        for detail_key, usage_key, metric_key in (
+            ("input_tokens_details", "cached_tokens", "cached_input_tokens"),
+            ("output_tokens_details", "reasoning_tokens", "reasoning_output_tokens"),
+        ):
+            details = usage.get(detail_key)
+            if isinstance(details, Mapping) and isinstance(details.get(usage_key), int):
+                metrics[metric_key] = details[usage_key]
+        return metrics
+
+    @staticmethod
+    def _trace_output(output: list[Any]) -> list[Any]:
+        def omit_encrypted_content(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): omit_encrypted_content(item)
+                    for key, item in value.items()
+                    if key != "encrypted_content"
+                }
+            if isinstance(value, list):
+                return [omit_encrypted_content(item) for item in value]
+            return value
+
+        return omit_encrypted_content(json_safe(output))
+
+    @staticmethod
+    def _response_metadata(response: Any) -> dict[str, Any]:
+        serialized = json_safe(response)
+        if not isinstance(serialized, Mapping):
+            return {}
+        keys = ("model", "created_at", "service_tier", "incomplete_details", "error")
+        return {key: serialized[key] for key in keys if key in serialized}
+
+    @staticmethod
+    def _failure_category(error: str | None) -> str:
+        if error == "unknown tool":
+            return "unknown_tool"
+        if error and error.startswith("Elasticsearch"):
+            return "execution"
+        return "validation"
+
+    @staticmethod
+    def _tool_metric_fields(
+        name: str,
+        tool_call_number: int | None,
+        duration: float,
+        data: Mapping[str, Any],
+        arguments: Any | None = None,
+        *,
+        status: str = "completed",
+        result_size_bytes: int | None = None,
+        failure_category: str | None = None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "tool_name": name,
+            "tool_status": status,
+            "tool_call_number": tool_call_number,
+            "duration_seconds": duration,
+            "result_size_bytes": (
+                serialized_size(data) if result_size_bytes is None else result_size_bytes
+            ),
+            "truncated": bool(data.get("truncated")),
+            "sampled": bool(data.get("sampled")),
+        }
+        for key in ("total_hits", "returned_hits"):
+            value = data.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                fields[key] = value
+        aggregations = getattr(arguments, "aggregations", None)
+        if isinstance(aggregations, Mapping) and aggregations:
+            fields["aggregation_names"] = list(aggregations)
+        if failure_category is not None:
+            fields["failure_category"] = failure_category
+        return fields
 
     @staticmethod
     def _function_call_input(call: Any) -> dict[str, Any]:

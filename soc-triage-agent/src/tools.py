@@ -246,13 +246,14 @@ def _compact_search_result(
     documents = [
         _compact_document(hit, source_fields)
         for hit in raw_hits
-        if isinstance(hit, Mapping) and isinstance(hit.get("_source", {}), Mapping)
+        if size > 0 and isinstance(hit, Mapping) and isinstance(hit.get("_source", {}), Mapping)
     ]
     table = _compact_document_table(documents)
     result: dict[str, Any] = {
         "total_hits": total,
         "returned_hits": len(documents),
-        "sampled": total > len(documents),
+        "sampled": size > 0 and total > len(documents),
+        "aggregation_only": size == 0,
         "truncated": False,
         **table,
         "aggregations": _compact_generic_aggregations(response.get("aggregations", {})),
@@ -287,7 +288,8 @@ def _compact_search_result(
     return {
         "total_hits": total,
         "returned_hits": 0,
-        "sampled": total > 0,
+        "sampled": size > 0 and total > 0,
+        "aggregation_only": size == 0,
         "truncated": True,
         "truncation_reason": "compact result exceeded MAX_TOOL_RESULT_BYTES",
         "omitted_hit_count": len(documents),
@@ -337,7 +339,7 @@ def _flatten_document(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
             fields.extend(_flatten_document(child, name))
         else:
             fields.append((name, child))
-    return fields[:MAX_SOURCE_FIELDS]
+    return fields[:_MAX_SOURCE_FIELDS]
 
 
 def _compact_table_value(value: Any) -> Any:
@@ -458,22 +460,26 @@ class InvestigationTools:
         try:
             _validate_search_args(args, self.settings)
             size = min(args.size, self.settings.max_query_results)
-            source_fields = args.source_fields or _EVENT_SOURCE_FIELDS
-            sort = args.sort or [{"@timestamp": "asc"}, {"_shard_doc": "asc"}]
+            source_fields = [] if size == 0 else args.source_fields or _EVENT_SOURCE_FIELDS
+            sort = None if size == 0 else args.sort or [{"@timestamp": "asc"}, {"_shard_doc": "asc"}]
+            timeout = f"{self.settings.elastic_search_timeout_seconds}s"
             self.last_query = {
                 "index": args.index,
                 "query": args.query,
                 "size": size,
                 "aggregations": args.aggregations,
+                "source": source_fields or None,
+                "sort": sort,
+                "timeout": timeout,
             }
             response = self.elastic.search(
                 index=args.index,
                 query=args.query,
                 size=size,
                 aggregations=args.aggregations,
-                source=source_fields,
+                source=source_fields or None,
                 sort=sort,
-                timeout=f"{self.settings.elastic_search_timeout_seconds}s",
+                timeout=timeout,
             )
             return ToolResult(
                 tool_name="search_elasticsearch",
@@ -486,12 +492,18 @@ class InvestigationTools:
                 ),
             )
         except ValueError as exc:
-            return ToolResult(tool_name="search_elasticsearch", ok=False, error=str(exc))
+            return ToolResult(
+                tool_name="search_elasticsearch",
+                ok=False,
+                error=str(exc),
+                failure_category="validation",
+            )
         except (ApiError, TransportError, KeyError, TypeError) as exc:
             return ToolResult(
                 tool_name="search_elasticsearch",
                 ok=False,
                 error=f"Elasticsearch query rejected: {str(exc)[:500]}",
+                failure_category="execution",
             )
 
     def discover_fields(self, args: DiscoverFieldsArgs) -> ToolResult:
@@ -566,8 +578,20 @@ class InvestigationTools:
                 tool_name="discover_fields",
                 ok=True, data=data,
             )
-        except (ApiError, TransportError, ValueError, KeyError, TypeError) as exc:
-            return ToolResult(tool_name="discover_fields", ok=False, error=str(exc))
+        except ValueError as exc:
+            return ToolResult(
+                tool_name="discover_fields",
+                ok=False,
+                error=str(exc),
+                failure_category="validation",
+            )
+        except (ApiError, TransportError, KeyError, TypeError) as exc:
+            return ToolResult(
+                tool_name="discover_fields",
+                ok=False,
+                error=str(exc),
+                failure_category="execution",
+            )
 
     def _execute(
         self,
@@ -709,6 +733,9 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": (
                 "Run a validated read-only Elasticsearch Query DSL search or aggregation. "
                 "Choose the index, filters, time range, fields, grouping, and statistics. "
+                "Prefer size=0 for questions answered entirely by aggregations. When representative "
+                "documents help, request a small bounded sample; retrieve larger event sets only "
+                "when a concrete investigative question cannot be answered by aggregations. "
                 "Results are compact and bounded; use discover_fields first when needed."
             ),
             "parameters": ElasticsearchSearchArgs.model_json_schema(),
