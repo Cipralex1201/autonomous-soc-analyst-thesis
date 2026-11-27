@@ -1,6 +1,7 @@
 #/thesis-documents/
 /other/
 /pentest-basics-training/
+thesis-documents/.~lock.szakdolgozat.docx#
 
 # Secrets
 .env
